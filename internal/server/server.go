@@ -2,6 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/md5"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -257,9 +260,33 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
+	sha1h := sha1.New()
+	md5h := md5.New()
+	if _, err := io.Copy(io.MultiWriter(sha1h, md5h), tmp); err != nil {
+		s.writeError(w, "compute checksum", err)
+		return
+	}
+
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		s.writeError(w, "buffer upload seek start", err)
+		return
+	}
+
 	err = s.store.Put(r.Context(), key, tmp, contentType, r.ContentLength)
 	if err != nil {
 		s.writeError(w, "store object", err)
+		return
+	}
+
+	sha1sum := hex.EncodeToString(sha1h.Sum(nil))
+	md5sum := hex.EncodeToString(md5h.Sum(nil))
+
+	if err := s.store.Put(r.Context(), key+".sha1", strings.NewReader(sha1sum), "text/plain", int64(len(sha1sum))); err != nil {
+		s.writeError(w, "store sha1", err)
+		return
+	}
+	if err := s.store.Put(r.Context(), key+".md5", strings.NewReader(md5sum), "text/plain", int64(len(md5sum))); err != nil {
+		s.writeError(w, "store md5", err)
 		return
 	}
 

@@ -23,6 +23,7 @@ type mockStore struct {
 	putErr   error
 	listResp []string
 	listErr  error
+	putKeys  []string
 }
 
 func (m *mockStore) Get(ctx context.Context, key string) (*s3.GetObjectOutput, error) {
@@ -40,6 +41,7 @@ func (m *mockStore) Head(ctx context.Context, key string) (*s3.HeadObjectOutput,
 }
 
 func (m *mockStore) Put(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error {
+	m.putKeys = append(m.putKeys, key)
 	return m.putErr
 }
 
@@ -116,6 +118,9 @@ func TestHandlePutOK(t *testing.T) {
 
 	if rr.Code != http.StatusCreated {
 		t.Fatalf("expected status 201, got %d", rr.Code)
+	}
+	if len(store.putKeys) != 3 {
+		t.Fatalf("expected 3 puts (artifact + checksums), got %d", len(store.putKeys))
 	}
 }
 
