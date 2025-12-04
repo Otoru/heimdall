@@ -164,10 +164,10 @@ func TestMetricsIncrement(t *testing.T) {
 
 func TestCatalogOK(t *testing.T) {
 	store := &mockStore{
-		listResp: []string{"releases/a.jar", "snapshots/b.jar"},
+		listResp: []string{"a.jar", "b/"},
 	}
 	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
-	req := httptest.NewRequest(http.MethodGet, "/catalog?prefix=releases&limit=2", nil)
+	req := httptest.NewRequest(http.MethodGet, "/catalog?path=releases&limit=2", nil)
 	rr := httptest.NewRecorder()
 
 	srv.Handler().ServeHTTP(rr, req)
@@ -178,7 +178,7 @@ func TestCatalogOK(t *testing.T) {
 	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		t.Fatalf("expected json content type, got %s", ct)
 	}
-	if !strings.Contains(rr.Body.String(), "releases/a.jar") {
+	if !strings.Contains(rr.Body.String(), "a.jar") || !strings.Contains(rr.Body.String(), "b/") {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 }

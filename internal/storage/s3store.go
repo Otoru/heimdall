@@ -174,8 +174,14 @@ func (s *Store) Put(ctx context.Context, key string, body io.ReadSeeker, content
 
 func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]string, error) {
 	p := strings.TrimPrefix(path.Clean("/"+prefix), "/")
+	if p != "" && !strings.HasSuffix(p, "/") {
+		p += "/"
+	}
 	if s.prefix != "" {
-		p = path.Join(s.prefix, p)
+		p = strings.TrimPrefix(path.Join(s.prefix, p), "/")
+		if p != "" && !strings.HasSuffix(p, "/") {
+			p += "/"
+		}
 	}
 
 	if limit <= 0 {
@@ -183,25 +189,47 @@ func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]string,
 	}
 
 	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:  aws.String(s.bucket),
-		Prefix:  aws.String(p),
-		MaxKeys: aws.Int32(limit),
+		Bucket:    aws.String(s.bucket),
+		Prefix:    aws.String(p),
+		MaxKeys:   aws.Int32(limit),
+		Delimiter: aws.String("/"),
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	var keys []string
+	trimPrefix := strings.Trim(p, "/")
+	trimPrefix = strings.TrimPrefix(trimPrefix, strings.Trim(s.prefix, "/"))
+	trimPrefix = strings.TrimPrefix(trimPrefix, "/")
+
+	for _, cp := range out.CommonPrefixes {
+		if cp.Prefix == nil {
+			continue
+		}
+		k := strings.TrimPrefix(*cp.Prefix, p)
+		k = strings.TrimSuffix(k, "/")
+		if k != "" {
+			keys = append(keys, k+"/")
+		}
+	}
 	for _, obj := range out.Contents {
 		if obj.Key == nil {
 			continue
 		}
-		k := *obj.Key
-		if s.prefix != "" {
-			k = strings.TrimPrefix(k, strings.Trim(s.prefix, "/")+"/")
+		if *obj.Key == p || *obj.Key == strings.TrimSuffix(p, "/") {
+			continue
 		}
-		keys = append(keys, k)
+		k := strings.TrimPrefix(*obj.Key, p)
+		if strings.Contains(k, "/") {
+			// deeper levels ignored because of delimiter; should not happen
+			continue
+		}
+		if k != "" {
+			keys = append(keys, k)
+		}
 	}
+
 	return keys, nil
 }
 

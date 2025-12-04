@@ -96,14 +96,14 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // @Summary List artifacts
 // @Tags catalog
-// @Param prefix query string false "Prefix to filter keys"
+// @Param path query string false "Path prefix (non-recursive); root by default"
 // @Param limit query int false "Max items" default(100)
 // @Produce json
 // @Success 200 {array} string
 // @Security BasicAuth
 // @Router /catalog [get]
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
-	prefix := r.URL.Query().Get("prefix")
+	prefix := r.URL.Query().Get("path")
 	limit := int32(100)
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 && parsed <= 1000 {
