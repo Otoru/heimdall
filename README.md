@@ -148,30 +148,6 @@ If you want to pull manually:
 helm pull oci://ghcr.io/otoru/heimdall-chart/heimdall --version 0.3.0
 ```
 
-Argo CD (OCI) example:
-
-```yaml
-apiVersion: argoproj.io/v1alpha1
-kind: Application
-metadata:
-  name: heimdall
-spec:
-  source:
-    repoURL: oci://ghcr.io/otoru/heimdall-chart
-    chart: heimdall
-    targetRevision: 0.3.0   # chart version
-    helm:
-      oci: true
-      releaseName: heimdall
-      values: |
-        env:
-          S3_BUCKET: my-bucket
-          S3_REGION: us-east-1
-  destination:
-    server: https://kubernetes.default.svc
-    namespace: heimdall
-```
-
 Notes:
 
 - Metrics are exposed on port `9090` with Prometheus annotations on the pod; scrape via service `metrics` port.
