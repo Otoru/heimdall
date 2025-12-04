@@ -1,0 +1,56 @@
+nameOverride: ""
+fullnameOverride: ""
+
+image:
+  repository: docker.io/otoru/heimdall
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 8080
+  metricsPort: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: heimdall.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources: {}
+
+autoscaling:
+  enabled: true
+  minReplicas: 1
+  maxReplicas: 3
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: 80
+
+env:
+  SERVER_ADDR: ":8080"
+  METRICS_ADDR: ":9090"
+  S3_REGION: "us-east-1"
+  S3_USE_PATH_STYLE: "false"
+  S3_PREFIX: ""
+  AUTH_USERNAME: ""
+  AUTH_PASSWORD: ""
+
+envConfigMaps: {}
+
+envSecrets: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

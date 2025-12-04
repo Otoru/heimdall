@@ -1,0 +1,27 @@
+# Binaries / build outputs
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build cache
+.gocache/
+
+# IDE/editor
+.DS_Store
+.idea/
+.vscode/
+
+# Dependencies
+vendor/
+*.mod
+
+# Logs / temp
+*.log
+tmp/
+dist/
+
+# Generated docs
+internal/docs/swagger.json
+internal/docs/swagger.yaml

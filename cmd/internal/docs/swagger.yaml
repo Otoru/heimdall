@@ -1,0 +1,11 @@
+basePath: /
+info:
+  contact: {}
+  description: Maven-compatible HTTP server backed by S3-compatible storage.
+  title: Heimdall API
+  version: "1.0"
+paths: {}
+securityDefinitions:
+  BasicAuth:
+    type: basic
+swagger: "2.0"
