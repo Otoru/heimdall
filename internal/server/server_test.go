@@ -52,6 +52,10 @@ func (m *mockStore) List(ctx context.Context, prefix string, limit int32) ([]str
 	return m.listResp, nil
 }
 
+func (m *mockStore) GenerateChecksums(ctx context.Context, prefix string) error {
+	return nil
+}
+
 func TestHandleGetOK(t *testing.T) {
 	store := &mockStore{
 		getResp: &s3.GetObjectOutput{

@@ -90,13 +90,15 @@ func main() {
 
 	ctx, cancelScan := context.WithCancel(context.Background())
 	defer cancelScan()
-	if cfg.ChecksumScanInterval != "" {
-		dur, err := time.ParseDuration(cfg.ChecksumScanInterval)
-		if err != nil {
-			logger.Warn("invalid CHECKSUM_SCAN_INTERVAL, skipping scanner", zap.Error(err))
-		} else if dur > 0 {
-			go server.RunChecksumScanner(ctx, logger, store, cfg.ChecksumScanPrefix, dur)
-		}
+	intervalStr := cfg.ChecksumScanInterval
+	if intervalStr == "" {
+		intervalStr = "30m"
+	}
+	dur, err := time.ParseDuration(intervalStr)
+	if err != nil {
+		logger.Warn("invalid CHECKSUM_SCAN_INTERVAL, skipping scanner", zap.Error(err))
+	} else if dur > 0 {
+		go server.RunChecksumScanner(ctx, logger, store, cfg.ChecksumScanPrefix, dur)
 	}
 
 	logger.Info("server starting", zap.String("addr", cfg.Addr), zap.String("bucket", cfg.Bucket), zap.String("prefix", cfg.Prefix))

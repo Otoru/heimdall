@@ -269,7 +269,7 @@ func (s *Store) GenerateChecksums(ctx context.Context, prefix string) error {
 			}
 		}
 
-		if out.IsTruncated && out.NextContinuationToken != nil {
+		if out.IsTruncated != nil && *out.IsTruncated && out.NextContinuationToken != nil {
 			token = out.NextContinuationToken
 			continue
 		}
