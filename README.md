@@ -137,9 +137,33 @@ From GHCR (OCI):
 ```bash
 helm registry login ghcr.io -u <user> -p <token>
 helm install heimdall oci://ghcr.io/otoru/heimdall-chart \
-  --version 1.0.0 \
+  --version 0.3.0 \
   --set env.S3_BUCKET=my-bucket \
   --set env.S3_REGION=us-east-1
+```
+
+Argo CD (OCI) example:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: heimdall
+spec:
+  source:
+    repoURL: ghcr.io/otoru/heimdall-chart
+    chart: heimdall
+    targetRevision: 0.3.0   # chart version
+    helm:
+      oci: true
+      releaseName: heimdall
+      values: |
+        env:
+          S3_BUCKET: my-bucket
+          S3_REGION: us-east-1
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: heimdall
 ```
 
 Notes:
