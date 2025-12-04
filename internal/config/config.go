@@ -19,6 +19,8 @@ type Config struct {
 	Prefix       string
 	AuthUser     string
 	AuthPassword string
+	ChecksumScanInterval string
+	ChecksumScanPrefix   string
 }
 
 func Load() (Config, error) {
@@ -32,6 +34,8 @@ func Load() (Config, error) {
 		Prefix:       strings.Trim(getenvDefault("S3_PREFIX", ""), "/"),
 		AuthUser:     os.Getenv("AUTH_USERNAME"),
 		AuthPassword: os.Getenv("AUTH_PASSWORD"),
+		ChecksumScanInterval: os.Getenv("CHECKSUM_SCAN_INTERVAL"),
+		ChecksumScanPrefix:   strings.Trim(getenvDefault("CHECKSUM_SCAN_PREFIX", ""), "/"),
 	}
 
 	bucket := os.Getenv("S3_BUCKET")

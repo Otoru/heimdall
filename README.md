@@ -23,6 +23,8 @@ Lightweight Maven-compatible HTTP server written in Go. It proxies `GET`, `HEAD`
 | `METRICS_ADDR` | `:9090` | no | Metrics listener (`/metrics`). |
 | `AUTH_USERNAME` | — | no | Enables Basic Auth when paired with password. |
 | `AUTH_PASSWORD` | — | no | Password for Basic Auth. |
+| `CHECKSUM_SCAN_INTERVAL` | — | no | Background checksum repair interval (e.g. `10m`); empty disables. |
+| `CHECKSUM_SCAN_PREFIX` | — | no | Limit checksum repair scan to a prefix. |
 
 Endpoints:
 

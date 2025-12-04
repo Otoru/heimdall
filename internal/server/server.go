@@ -27,6 +27,7 @@ type Storage interface {
 	Head(ctx context.Context, key string) (*s3.HeadObjectOutput, error)
 	Put(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error
 	List(ctx context.Context, prefix string, limit int32) ([]string, error)
+	GenerateChecksums(ctx context.Context, prefix string) error
 }
 
 type Server struct {

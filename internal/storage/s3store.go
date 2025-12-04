@@ -9,6 +9,9 @@ import (
 	"path"
 	"strings"
 
+	"crypto/md5"
+	"crypto/sha1"
+	"encoding/hex"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -231,6 +234,123 @@ func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]string,
 	}
 
 	return keys, nil
+}
+
+func (s *Store) GenerateChecksums(ctx context.Context, prefix string) error {
+	p := strings.TrimPrefix(path.Clean("/"+prefix), "/")
+	if s.prefix != "" {
+		p = path.Join(s.prefix, p)
+	}
+	p = strings.TrimPrefix(p, "/")
+
+	var token *string
+
+	for {
+		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(p),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return err
+		}
+
+		for _, obj := range out.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			key := *obj.Key
+			if strings.HasSuffix(key, "/") || strings.HasSuffix(key, ".sha1") || strings.HasSuffix(key, ".md5") {
+				continue
+			}
+
+			if err := s.ensureChecksums(ctx, key); err != nil {
+				return err
+			}
+		}
+
+		if out.IsTruncated && out.NextContinuationToken != nil {
+			token = out.NextContinuationToken
+			continue
+		}
+		break
+	}
+
+	return nil
+}
+
+func (s *Store) ensureChecksums(ctx context.Context, key string) error {
+	needsSha1 := false
+	needsMd5 := false
+
+	if _, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key + ".sha1"),
+	}); err != nil {
+		if IsNotFound(err) {
+			needsSha1 = true
+		} else {
+			return err
+		}
+	}
+
+	if _, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key + ".md5"),
+	}); err != nil {
+		if IsNotFound(err) {
+			needsMd5 = true
+		} else {
+			return err
+		}
+	}
+
+	if !needsSha1 && !needsMd5 {
+		return nil
+	}
+
+	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return err
+	}
+	defer obj.Body.Close()
+
+	sha1h := sha1.New()
+	md5h := md5.New()
+	if _, err := io.Copy(io.MultiWriter(sha1h, md5h), obj.Body); err != nil {
+		return err
+	}
+
+	if needsSha1 {
+		sum := hex.EncodeToString(sha1h.Sum(nil))
+		if _, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(s.bucket),
+			Key:           aws.String(key + ".sha1"),
+			Body:          strings.NewReader(sum),
+			ContentType:   aws.String("text/plain"),
+			ContentLength: aws.Int64(int64(len(sum))),
+		}); err != nil {
+			return err
+		}
+	}
+
+	if needsMd5 {
+		sum := hex.EncodeToString(md5h.Sum(nil))
+		if _, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket:        aws.String(s.bucket),
+			Key:           aws.String(key + ".md5"),
+			Body:          strings.NewReader(sum),
+			ContentType:   aws.String("text/plain"),
+			ContentLength: aws.Int64(int64(len(sum))),
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func IsNotFound(err error) bool {
