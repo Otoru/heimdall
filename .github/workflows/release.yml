@@ -4,10 +4,6 @@ on:
   release:
     types: [published]
 
-env:
-  REGISTRY: docker.io
-  IMAGE_NAME: otoru/heimdall
-
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
@@ -31,11 +27,20 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: |
+            docker.io/otoru/heimdall
+            ghcr.io/otoru/heimdall
           tags: |
             type=semver,pattern={{version}},value=${{ github.event.release.tag_name }}
             type=raw,value=latest
