@@ -136,10 +136,16 @@ From GHCR (OCI):
 
 ```bash
 helm registry login ghcr.io -u <user> -p <token>
-helm install heimdall oci://ghcr.io/otoru/heimdall-chart \
+helm install heimdall oci://ghcr.io/otoru/heimdall-chart/heimdall \
   --version 0.3.0 \
   --set env.S3_BUCKET=my-bucket \
   --set env.S3_REGION=us-east-1
+```
+
+If you want to pull manually:
+
+```bash
+helm pull oci://ghcr.io/otoru/heimdall-chart/heimdall --version 0.3.0
 ```
 
 Argo CD (OCI) example:
@@ -151,7 +157,7 @@ metadata:
   name: heimdall
 spec:
   source:
-    repoURL: ghcr.io/otoru/heimdall-chart
+    repoURL: oci://ghcr.io/otoru/heimdall-chart
     chart: heimdall
     targetRevision: 0.3.0   # chart version
     helm:
