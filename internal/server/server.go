@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -22,6 +23,7 @@ type Storage interface {
 	Get(ctx context.Context, key string) (*s3.GetObjectOutput, error)
 	Head(ctx context.Context, key string) (*s3.HeadObjectOutput, error)
 	Put(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error
+	List(ctx context.Context, prefix string, limit int32) ([]string, error)
 }
 
 type Server struct {
@@ -46,6 +48,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
+	mux.HandleFunc("/catalog", s.authMiddleware(s.handleCatalog))
 	mux.HandleFunc("/", s.authMiddleware(s.handleObject))
 
 	var handler http.Handler = mux
@@ -89,6 +92,36 @@ func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok"))
+}
+
+// @Summary List artifacts
+// @Tags catalog
+// @Param prefix query string false "Prefix to filter keys"
+// @Param limit query int false "Max items" default(100)
+// @Produce json
+// @Success 200 {array} string
+// @Security BasicAuth
+// @Router /catalog [get]
+func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
+	prefix := r.URL.Query().Get("prefix")
+	limit := int32(100)
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = int32(parsed)
+		}
+	}
+
+	keys, err := s.store.List(r.Context(), prefix, limit)
+	if err != nil {
+		s.writeError(w, "list objects", err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if err := json.NewEncoder(w).Encode(keys); err != nil {
+		s.logger.Warn("encode catalog", zap.Error(err))
+	}
 }
 
 func (s *Server) handleObject(w http.ResponseWriter, r *http.Request) {

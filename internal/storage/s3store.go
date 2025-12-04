@@ -172,6 +172,39 @@ func (s *Store) Put(ctx context.Context, key string, body io.ReadSeeker, content
 	return nil
 }
 
+func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]string, error) {
+	p := strings.TrimPrefix(path.Clean("/"+prefix), "/")
+	if s.prefix != "" {
+		p = path.Join(s.prefix, p)
+	}
+
+	if limit <= 0 {
+		limit = 100
+	}
+
+	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+		Bucket:  aws.String(s.bucket),
+		Prefix:  aws.String(p),
+		MaxKeys: aws.Int32(limit),
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var keys []string
+	for _, obj := range out.Contents {
+		if obj.Key == nil {
+			continue
+		}
+		k := *obj.Key
+		if s.prefix != "" {
+			k = strings.TrimPrefix(k, strings.Trim(s.prefix, "/")+"/")
+		}
+		keys = append(keys, k)
+	}
+	return keys, nil
+}
+
 func IsNotFound(err error) bool {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {

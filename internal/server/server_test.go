@@ -21,6 +21,8 @@ type mockStore struct {
 	getErr   error
 	headErr  error
 	putErr   error
+	listResp []string
+	listErr  error
 }
 
 func (m *mockStore) Get(ctx context.Context, key string) (*s3.GetObjectOutput, error) {
@@ -39,6 +41,13 @@ func (m *mockStore) Head(ctx context.Context, key string) (*s3.HeadObjectOutput,
 
 func (m *mockStore) Put(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error {
 	return m.putErr
+}
+
+func (m *mockStore) List(ctx context.Context, prefix string, limit int32) ([]string, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return m.listResp, nil
 }
 
 func TestHandleGetOK(t *testing.T) {
@@ -150,5 +159,26 @@ func TestMetricsIncrement(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected heimdall_http_requests_total metric to be present")
+	}
+}
+
+func TestCatalogOK(t *testing.T) {
+	store := &mockStore{
+		listResp: []string{"releases/a.jar", "snapshots/b.jar"},
+	}
+	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
+	req := httptest.NewRequest(http.MethodGet, "/catalog?prefix=releases&limit=2", nil)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 got %d", rr.Code)
+	}
+	if ct := rr.Header().Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		t.Fatalf("expected json content type, got %s", ct)
+	}
+	if !strings.Contains(rr.Body.String(), "releases/a.jar") {
+		t.Fatalf("unexpected body: %s", rr.Body.String())
 	}
 }
