@@ -118,7 +118,7 @@ Charts live under `charts/heimdall`. Package version is tracked in `Chart.yaml` 
 
 | Key | Description |
 | --- | --- |
-| `image.repository` / `image.tag` | Container image (defaults to `docker.io/otoru/heimdall:latest`). |
+| `image.repository` / `image.tag` | Container image (defaults to `ghcr.io/otoru/heimdall:<appVersion>`; set `image.tag` to override). |
 | `service.port` / `service.metricsPort` | HTTP and metrics ports. |
 | `autoscaling.*` | HPA settings (CPU/memory utilization targets, min/max replicas). |
 | `ingress.*` | Ingress host/paths/class/tls. |

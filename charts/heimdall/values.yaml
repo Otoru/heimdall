@@ -2,7 +2,7 @@ nameOverride: ""
 fullnameOverride: ""
 
 image:
-  repository: docker.io/otoru/heimdall
+  repository: ghcr.io/otoru/heimdall
   tag: ""
   pullPolicy: IfNotPresent
 
