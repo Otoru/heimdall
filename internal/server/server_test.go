@@ -128,6 +128,17 @@ func TestHandlePutOK(t *testing.T) {
 	}
 }
 
+func TestAuthRequired(t *testing.T) {
+	store := &mockStore{}
+	srv := New(store, zaptest.NewLogger(t), metrics.New(), "user", "pass")
+	req := httptest.NewRequest(http.MethodPut, "/secure/artifact", strings.NewReader("data"))
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+}
 func TestHandleGetNotFound(t *testing.T) {
 	store := &mockStore{
 		getErr: errors.New("NotFound"),
