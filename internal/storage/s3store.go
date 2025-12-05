@@ -38,6 +38,13 @@ type Store struct {
 	prefix     string
 }
 
+type Entry struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Type string `json:"type"` // file or dir
+	Size int64  `json:"size,omitempty"`
+}
+
 func New(ctx context.Context, opts Options) (*Store, error) {
 	if opts.Bucket == "" {
 		return nil, fmt.Errorf("bucket is required")
@@ -72,6 +79,7 @@ func New(ctx context.Context, opts Options) (*Store, error) {
 
 	client := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
 		o.UsePathStyle = opts.UsePathStyle
+		o.DisableLogOutputChecksumValidationSkipped = true
 	})
 
 	return &Store{
@@ -175,7 +183,51 @@ func (s *Store) Put(ctx context.Context, key string, body io.ReadSeeker, content
 	return nil
 }
 
-func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]string, error) {
+func (s *Store) putAbsolute(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error {
+	putInput := &s3.PutObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	}
+	if contentType != "" {
+		putInput.ContentType = aws.String(contentType)
+	}
+	if contentLength >= 0 {
+		putInput.ContentLength = aws.Int64(contentLength)
+	}
+
+	if _, err := body.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek body: %w", err)
+	}
+
+	psReq, err := s.presign.PresignPutObject(ctx, putInput)
+	if err != nil {
+		return fmt.Errorf("presign put: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, psReq.URL, io.NopCloser(body))
+	if err != nil {
+		return fmt.Errorf("build put request: %w", err)
+	}
+	req.ContentLength = contentLength
+	for k, vals := range psReq.SignedHeader {
+		for _, v := range vals {
+			req.Header.Add(k, v)
+		}
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("upload: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		slurp, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("upload failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(slurp)))
+	}
+	return nil
+}
+
+func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]Entry, error) {
 	p := strings.TrimPrefix(path.Clean("/"+prefix), "/")
 	if p != "" && !strings.HasSuffix(p, "/") {
 		p += "/"
@@ -201,10 +253,8 @@ func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]string,
 		return nil, err
 	}
 
-	var keys []string
-	trimPrefix := strings.Trim(p, "/")
-	trimPrefix = strings.TrimPrefix(trimPrefix, strings.Trim(s.prefix, "/"))
-	trimPrefix = strings.TrimPrefix(trimPrefix, "/")
+	var keys []Entry
+	basePath := strings.TrimSuffix(p, "/")
 
 	for _, cp := range out.CommonPrefixes {
 		if cp.Prefix == nil {
@@ -213,7 +263,11 @@ func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]string,
 		k := strings.TrimPrefix(*cp.Prefix, p)
 		k = strings.TrimSuffix(k, "/")
 		if k != "" {
-			keys = append(keys, k+"/")
+			keys = append(keys, Entry{
+				Name: k + "/",
+				Path: path.Join(basePath, k) + "/",
+				Type: "dir",
+			})
 		}
 	}
 	for _, obj := range out.Contents {
@@ -229,7 +283,16 @@ func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]string,
 			continue
 		}
 		if k != "" {
-			keys = append(keys, k)
+			size := int64(0)
+			if obj.Size != nil {
+				size = *obj.Size
+			}
+			keys = append(keys, Entry{
+				Name: k,
+				Path: path.Join(basePath, k),
+				Type: "file",
+				Size: size,
+			})
 		}
 	}
 
@@ -266,6 +329,52 @@ func (s *Store) GenerateChecksums(ctx context.Context, prefix string) error {
 
 			if err := s.ensureChecksums(ctx, key); err != nil {
 				return err
+			}
+		}
+
+		if out.IsTruncated != nil && *out.IsTruncated && out.NextContinuationToken != nil {
+			token = out.NextContinuationToken
+			continue
+		}
+		break
+	}
+
+	return nil
+}
+
+func (s *Store) CleanupBadChecksums(ctx context.Context, prefix string) error {
+	p := strings.TrimPrefix(path.Clean("/"+prefix), "/")
+	if s.prefix != "" {
+		p = path.Join(s.prefix, p)
+	}
+	p = strings.TrimPrefix(p, "/")
+
+	var token *string
+	badSuffixes := []string{".sha1.sha1", ".sha1.md5", ".md5.sha1", ".md5.md5"}
+
+	for {
+		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(p),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return err
+		}
+
+		for _, obj := range out.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			key := *obj.Key
+			for _, suf := range badSuffixes {
+				if strings.HasSuffix(key, suf) {
+					_, _ = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+						Bucket: aws.String(s.bucket),
+						Key:    aws.String(key),
+					})
+					break
+				}
 			}
 		}
 
@@ -326,26 +435,14 @@ func (s *Store) ensureChecksums(ctx context.Context, key string) error {
 
 	if needsSha1 {
 		sum := hex.EncodeToString(sha1h.Sum(nil))
-		if _, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:        aws.String(s.bucket),
-			Key:           aws.String(key + ".sha1"),
-			Body:          strings.NewReader(sum),
-			ContentType:   aws.String("text/plain"),
-			ContentLength: aws.Int64(int64(len(sum))),
-		}); err != nil {
+		if err := s.putAbsolute(ctx, key+".sha1", strings.NewReader(sum), "text/plain", int64(len(sum))); err != nil {
 			return err
 		}
 	}
 
 	if needsMd5 {
 		sum := hex.EncodeToString(md5h.Sum(nil))
-		if _, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-			Bucket:        aws.String(s.bucket),
-			Key:           aws.String(key + ".md5"),
-			Body:          strings.NewReader(sum),
-			ContentType:   aws.String("text/plain"),
-			ContentLength: aws.Int64(int64(len(sum))),
-		}); err != nil {
+		if err := s.putAbsolute(ctx, key+".md5", strings.NewReader(sum), "text/plain", int64(len(sum))); err != nil {
 			return err
 		}
 	}

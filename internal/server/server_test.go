@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/otoru/heimdall/internal/metrics"
+	"github.com/otoru/heimdall/internal/storage"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -21,7 +22,7 @@ type mockStore struct {
 	getErr   error
 	headErr  error
 	putErr   error
-	listResp []string
+	listResp []storage.Entry
 	listErr  error
 	putKeys  []string
 }
@@ -45,7 +46,7 @@ func (m *mockStore) Put(ctx context.Context, key string, body io.ReadSeeker, con
 	return m.putErr
 }
 
-func (m *mockStore) List(ctx context.Context, prefix string, limit int32) ([]string, error) {
+func (m *mockStore) List(ctx context.Context, prefix string, limit int32) ([]storage.Entry, error) {
 	if m.listErr != nil {
 		return nil, m.listErr
 	}
@@ -53,6 +54,10 @@ func (m *mockStore) List(ctx context.Context, prefix string, limit int32) ([]str
 }
 
 func (m *mockStore) GenerateChecksums(ctx context.Context, prefix string) error {
+	return nil
+}
+
+func (m *mockStore) CleanupBadChecksums(ctx context.Context, prefix string) error {
 	return nil
 }
 
@@ -184,7 +189,10 @@ func TestMetricsIncrement(t *testing.T) {
 
 func TestCatalogOK(t *testing.T) {
 	store := &mockStore{
-		listResp: []string{"a.jar", "b/"},
+		listResp: []storage.Entry{
+			{Name: "a.jar", Path: "releases/a.jar", Type: "file"},
+			{Name: "b/", Path: "releases/b/", Type: "dir"},
+		},
 	}
 	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
 	req := httptest.NewRequest(http.MethodGet, "/catalog?path=releases&limit=2", nil)

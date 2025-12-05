@@ -20,6 +20,9 @@ func RunChecksumScanner(ctx context.Context, logger *zap.Logger, store Storage, 
 		case running <- struct{}{}:
 			go func() {
 				defer func() { <-running }()
+				if err := store.CleanupBadChecksums(ctx, prefix); err != nil {
+					logger.Warn("checksum cleanup failed", zap.Error(err))
+				}
 				if err := store.GenerateChecksums(ctx, prefix); err != nil {
 					logger.Warn("checksum scan failed", zap.Error(err))
 				}
