@@ -7,6 +7,8 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	t.Setenv("S3_BUCKET", "test-bucket")
+	t.Setenv("S3_REGION", "")
+	t.Setenv("S3_USE_PATH_STYLE", "")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatalf("load config: %v", err)

@@ -243,57 +243,78 @@ func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]Entry, 
 		limit = 100
 	}
 
-	out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
-		Bucket:    aws.String(s.bucket),
-		Prefix:    aws.String(p),
-		MaxKeys:   aws.Int32(limit),
-		Delimiter: aws.String("/"),
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	var keys []Entry
 	basePath := strings.TrimSuffix(p, "/")
+	var token *string
 
-	for _, cp := range out.CommonPrefixes {
-		if cp.Prefix == nil {
-			continue
+	for {
+		pageLimit := limit
+		remaining := limit - int32(len(keys))
+		if remaining > 0 {
+			pageLimit = remaining
 		}
-		k := strings.TrimPrefix(*cp.Prefix, p)
-		k = strings.TrimSuffix(k, "/")
-		if k != "" {
-			keys = append(keys, Entry{
-				Name: k + "/",
-				Path: path.Join(basePath, k) + "/",
-				Type: "dir",
-			})
+
+		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(p),
+			MaxKeys:           aws.Int32(pageLimit),
+			Delimiter:         aws.String("/"),
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, err
 		}
-	}
-	for _, obj := range out.Contents {
-		if obj.Key == nil {
-			continue
-		}
-		if *obj.Key == p || *obj.Key == strings.TrimSuffix(p, "/") {
-			continue
-		}
-		k := strings.TrimPrefix(*obj.Key, p)
-		if strings.Contains(k, "/") {
-			// deeper levels ignored because of delimiter; should not happen
-			continue
-		}
-		if k != "" {
-			size := int64(0)
-			if obj.Size != nil {
-				size = *obj.Size
+
+		for _, cp := range out.CommonPrefixes {
+			if cp.Prefix == nil {
+				continue
 			}
-			keys = append(keys, Entry{
-				Name: k,
-				Path: path.Join(basePath, k),
-				Type: "file",
-				Size: size,
-			})
+			k := strings.TrimPrefix(*cp.Prefix, p)
+			k = strings.TrimSuffix(k, "/")
+			if k != "" {
+				keys = append(keys, Entry{
+					Name: k + "/",
+					Path: path.Join(basePath, k) + "/",
+					Type: "dir",
+				})
+			}
 		}
+		for _, obj := range out.Contents {
+			if obj.Key == nil {
+				continue
+			}
+			if *obj.Key == p || *obj.Key == strings.TrimSuffix(p, "/") {
+				continue
+			}
+			k := strings.TrimPrefix(*obj.Key, p)
+			if strings.Contains(k, "/") {
+				// deeper levels ignored because of delimiter; should not happen
+				continue
+			}
+			if k != "" {
+				size := int64(0)
+				if obj.Size != nil {
+					size = *obj.Size
+				}
+				keys = append(keys, Entry{
+					Name: k,
+					Path: path.Join(basePath, k),
+					Type: "file",
+					Size: size,
+				})
+			}
+		}
+
+		if int32(len(keys)) >= limit {
+			keys = keys[:limit]
+			break
+		}
+
+		if out.IsTruncated != nil && *out.IsTruncated && out.NextContinuationToken != nil {
+			token = out.NextContinuationToken
+			continue
+		}
+		break
 	}
 
 	return keys, nil
