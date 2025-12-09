@@ -144,7 +144,7 @@ func (p *ProxyManager) FetchFromAny(ctx context.Context, artifactPath string) (s
 		key := path.Join(pr.Name, artifactPath)
 		found, err := p.FetchAndCache(ctx, key)
 		if err != nil {
-			if se, ok := err.(ProxyStatusError); ok && (se.Code == http.StatusNotFound || se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden) {
+			if se, ok := err.(ProxyStatusError); ok && (se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden || se.Code == http.StatusNotFound) {
 				lastStatus = se
 				continue
 			}
@@ -170,7 +170,7 @@ func (p *ProxyManager) HeadFromAny(ctx context.Context, artifactPath string) (*h
 		key := path.Join(pr.Name, artifactPath)
 		resp, found, err := p.Head(ctx, key)
 		if err != nil {
-			if se, ok := err.(ProxyStatusError); ok && (se.Code == http.StatusNotFound || se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden) {
+			if se, ok := err.(ProxyStatusError); ok && (se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden || se.Code == http.StatusNotFound) {
 				lastStatus = se
 				continue
 			}
@@ -236,6 +236,9 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 
 	if resp.StatusCode == http.StatusNotFound {
 		return false, nil
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return false, ProxyStatusError{Code: resp.StatusCode}
 	}
 	if resp.StatusCode >= 300 {
 		return false, ProxyStatusError{Code: resp.StatusCode}
@@ -323,8 +326,11 @@ func (p *ProxyManager) ListPath(ctx context.Context, key string, limit int32) ([
 	if resp.StatusCode == http.StatusNotFound {
 		return []storage.Entry{}, true, nil
 	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, true, ProxyStatusError{Code: resp.StatusCode}
+	}
 	if resp.StatusCode >= 300 {
-		return nil, true, fmt.Errorf("proxy list: status %d", resp.StatusCode)
+		return nil, true, ProxyStatusError{Code: resp.StatusCode}
 	}
 
 	doc, err := html.Parse(resp.Body)
@@ -417,6 +423,10 @@ func (p *ProxyManager) Head(ctx context.Context, key string) (*http.Response, bo
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
 		return nil, false, nil
+	}
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		resp.Body.Close()
+		return nil, false, ProxyStatusError{Code: resp.StatusCode}
 	}
 	if resp.StatusCode >= 300 {
 		resp.Body.Close()

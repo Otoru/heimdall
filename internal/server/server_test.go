@@ -240,6 +240,17 @@ func TestWriteErrorProxyStatusPointer(t *testing.T) {
 	}
 }
 
+func TestWriteErrorCanceled(t *testing.T) {
+	rr := httptest.NewRecorder()
+	srv := New(&mockStore{}, zaptest.NewLogger(t), metrics.New(), "", "")
+	_, cancel := context.WithCancel(context.Background())
+	cancel()
+	srv.writeError(rr, "fetch object", context.Canceled)
+	if rr.Code != 499 {
+		t.Fatalf("expected 499, got %d", rr.Code)
+	}
+}
+
 func TestMetricsIncrement(t *testing.T) {
 	m := metrics.New()
 	store := &mockStore{

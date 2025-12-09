@@ -408,6 +408,10 @@ func (s *Server) listPackages(ctx context.Context, prefix string, limit int32) (
 	for _, pr := range proxies {
 		prEntries, _, err := s.proxy.ListPath(ctx, path.Join(pr.Name, clean), remaining)
 		if err != nil {
+			var se ProxyStatusError
+			if errors.As(err, &se) && (se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden) {
+				continue
+			}
 			s.logger.Warn("list packages proxy", zap.String("proxy", pr.Name), zap.Error(err))
 			continue
 		}
@@ -804,6 +808,10 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 func (s *Server) writeError(w http.ResponseWriter, action string, err error) {
 	if storage.IsNotFound(err) {
 		http.NotFound(w, nil)
+		return
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		w.WriteHeader(499)
 		return
 	}
 	var se ProxyStatusError
