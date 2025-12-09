@@ -76,6 +76,52 @@ const docTemplate = `{
                 }
             }
         },
+        "/packages/{artifactPath}": {
+            "get": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "packages"
+                ],
+                "summary": "Group repository (packages) GET/HEAD",
+                "responses": {
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            },
+            "head": {
+                "security": [
+                    {
+                        "BasicAuth": []
+                    }
+                ],
+                "produces": [
+                    "application/octet-stream"
+                ],
+                "tags": [
+                    "packages"
+                ],
+                "summary": "Group repository (packages) GET/HEAD",
+                "responses": {
+                    "404": {
+                        "description": "Not Found",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                }
+            }
+        },
         "/proxies": {
             "get": {
                 "security": [
