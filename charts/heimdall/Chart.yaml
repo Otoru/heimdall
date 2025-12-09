@@ -2,5 +2,5 @@ apiVersion: v2
 name: heimdall
 description: Lightweight Maven-compatible HTTP server backed by S3
 type: application
-version: 0.5.3
-appVersion: "1.0.7"
+version: 0.5.4
+appVersion: "1.0.8"

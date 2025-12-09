@@ -169,4 +169,4 @@ helm pull oci://ghcr.io/otoru/heimdall-chart/heimdall --version 0.5.3
 Notes:
 
 - Metrics are exposed on port `9090` with Prometheus annotations on the pod; scrape via service `metrics` port.
-- HPA is enabled by default; adjust `autoscaling` values to fit your cluster.
+- HPA is disabled by default; set `autoscaling.enabled=true` to turn it on.

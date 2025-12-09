@@ -165,3 +165,37 @@ func TestProxyFetchAndCache(t *testing.T) {
 		t.Fatalf("unexpected body %q", string(body))
 	}
 }
+
+func TestProxyFetchChecksumDoesNotChain(t *testing.T) {
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/com/acme/app/1.0/app-1.0.jar.sha1" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte("abc123"))
+	}))
+	defer remote.Close()
+
+	store := newMemStore()
+	pm := NewProxyManager(store, zaptest.NewLogger(t))
+	if err := pm.Add(context.Background(), Proxy{Name: "central", URL: remote.URL}); err != nil {
+		t.Fatalf("add proxy: %v", err)
+	}
+
+	found, err := pm.FetchAndCache(context.Background(), "central/com/acme/app/1.0/app-1.0.jar.sha1")
+	if err != nil {
+		t.Fatalf("fetch and cache: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected found=true")
+	}
+	if _, ok := store.data["central/com/acme/app/1.0/app-1.0.jar.sha1"]; !ok {
+		t.Fatalf("checksum not stored")
+	}
+	if _, ok := store.data["central/com/acme/app/1.0/app-1.0.jar.sha1.sha1"]; ok {
+		t.Fatalf("unexpected chained checksum stored")
+	}
+	if _, ok := store.data["central/com/acme/app/1.0/app-1.0.jar.sha1.md5"]; ok {
+		t.Fatalf("unexpected chained md5 stored")
+	}
+}

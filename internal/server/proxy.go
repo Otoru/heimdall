@@ -135,6 +135,8 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 		return false, nil
 	}
 
+	isChecksum := strings.HasSuffix(strings.ToLower(artifactPath), ".sha1") || strings.HasSuffix(strings.ToLower(artifactPath), ".md5")
+
 	proxy, found, err := p.findByName(ctx, name)
 	if err != nil {
 		return false, err
@@ -191,13 +193,15 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 		return false, err
 	}
 
-	sha1sum := hex.EncodeToString(sha1h.Sum(nil))
-	md5sum := hex.EncodeToString(md5h.Sum(nil))
-	if err := p.store.Put(ctx, key+".sha1", strings.NewReader(sha1sum), "text/plain", int64(len(sha1sum))); err != nil {
-		return false, err
-	}
-	if err := p.store.Put(ctx, key+".md5", strings.NewReader(md5sum), "text/plain", int64(len(md5sum))); err != nil {
-		return false, err
+	if !isChecksum {
+		sha1sum := hex.EncodeToString(sha1h.Sum(nil))
+		md5sum := hex.EncodeToString(md5h.Sum(nil))
+		if err := p.store.Put(ctx, key+".sha1", strings.NewReader(sha1sum), "text/plain", int64(len(sha1sum))); err != nil {
+			return false, err
+		}
+		if err := p.store.Put(ctx, key+".md5", strings.NewReader(md5sum), "text/plain", int64(len(md5sum))); err != nil {
+			return false, err
+		}
 	}
 
 	return true, nil
