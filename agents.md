@@ -36,4 +36,4 @@ Notes for changes:
   - Update docs/swagger via `swag init -g cmd/heimdall/main.go -o internal/docs` after changing handlers/annotations.
   - Reflect behavior/API changes in `README.md` and `agents.md`.
   - Bump versions with semver: app tags `vX.Y.Z` (image), chart tags `chart-X.Y.Z` (chart `appVersion` matches image tag).
-  - Verify chart defaults when changing values (HPA disabled by default).
+  - Versioning guidance: patch = fixes/non-breaking; minor = new compatible features; major = breaking changes; chart semver follows chart impact and appVersion tracks the image.
