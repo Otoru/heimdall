@@ -139,15 +139,23 @@ func (p *ProxyManager) FetchFromAny(ctx context.Context, artifactPath string) (s
 	if err != nil {
 		return "", false, err
 	}
+	var lastStatus ProxyStatusError
 	for _, pr := range proxies {
 		key := path.Join(pr.Name, artifactPath)
 		found, err := p.FetchAndCache(ctx, key)
 		if err != nil {
+			if se, ok := err.(ProxyStatusError); ok && (se.Code == http.StatusNotFound || se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden) {
+				lastStatus = se
+				continue
+			}
 			return "", false, err
 		}
 		if found {
 			return key, true, nil
 		}
+	}
+	if lastStatus.Code != 0 {
+		return "", false, lastStatus
 	}
 	return "", false, nil
 }
@@ -157,15 +165,23 @@ func (p *ProxyManager) HeadFromAny(ctx context.Context, artifactPath string) (*h
 	if err != nil {
 		return nil, false, err
 	}
+	var lastStatus ProxyStatusError
 	for _, pr := range proxies {
 		key := path.Join(pr.Name, artifactPath)
 		resp, found, err := p.Head(ctx, key)
 		if err != nil {
+			if se, ok := err.(ProxyStatusError); ok && (se.Code == http.StatusNotFound || se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden) {
+				lastStatus = se
+				continue
+			}
 			return nil, false, err
 		}
 		if found {
 			return resp, true, nil
 		}
+	}
+	if lastStatus.Code != 0 {
+		return nil, false, lastStatus
 	}
 	return nil, false, nil
 }
