@@ -367,6 +367,7 @@ func TestCatalogPackagesFiltersProxyCfg(t *testing.T) {
 func TestPackagesGetLocal(t *testing.T) {
 	store := newListStore()
 	store.objects["com/acme/app/1.0/app-1.0.jar"] = []byte("LOCAL")
+	store.listByPrefix[""] = []storage.Entry{{Name: "root/", Path: "root/", Type: "dir"}}
 
 	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
 	req := httptest.NewRequest(http.MethodGet, "/packages/com/acme/app/1.0/app-1.0.jar", nil)
@@ -390,6 +391,7 @@ func TestPackagesGetCachedProxy(t *testing.T) {
 	store.objects["__proxycfg__/central.json"] = []byte(`{"name":"central","url":"https://repo.maven.apache.org/maven2"}`)
 	key := "com/acme/app/1.0/app-1.0.jar"
 	store.objects["central/"+key] = []byte("CACHED")
+	store.listByPrefix[""] = []storage.Entry{{Name: "central/", Path: "central/", Type: "dir"}}
 
 	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
 	srv.proxy = NewProxyManager(store, zaptest.NewLogger(t))
@@ -409,6 +411,7 @@ func TestPackagesGetCachedProxy(t *testing.T) {
 func TestPackagesHeadLocal(t *testing.T) {
 	store := newListStore()
 	store.objects["com/acme/app/1.0/app-1.0.jar"] = []byte("LOCAL")
+	store.listByPrefix[""] = []storage.Entry{{Name: "root/", Path: "root/", Type: "dir"}}
 
 	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
 	req := httptest.NewRequest(http.MethodHead, "/packages/com/acme/app/1.0/app-1.0.jar", nil)
