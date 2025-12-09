@@ -177,6 +177,11 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if prefix == "" || prefix == "/" {
+		keys = append(keys, storage.Entry{
+			Name: "packages/",
+			Path: "packages/",
+			Type: "group",
+		})
 		if proxies, err := s.proxy.List(r.Context()); err == nil {
 			for _, pr := range proxies {
 				keys = append(keys, storage.Entry{
@@ -359,13 +364,34 @@ func (s *Server) listPackages(ctx context.Context, prefix string, limit int32) (
 		remaining = 100
 	}
 
+	seen := map[string]struct{}{}
+	add := func(e storage.Entry) {
+		trimmed := strings.TrimPrefix(e.Path, "packages/")
+		if strings.HasPrefix(trimmed, proxyConfigPrefix) || strings.HasPrefix(e.Name, proxyConfigPrefix) {
+			return
+		}
+		if e.Type == "dir" || e.Type == "proxy" || e.Type == "group" {
+			if !strings.HasSuffix(e.Name, "/") {
+				e.Name += "/"
+			}
+			if !strings.HasSuffix(e.Path, "/") {
+				e.Path += "/"
+			}
+		}
+		if _, ok := seen[e.Name]; ok {
+			return
+		}
+		seen[e.Name] = struct{}{}
+		keys = append(keys, e)
+		remaining--
+	}
+
 	// local
 	local, err := s.store.List(ctx, clean, remaining)
 	if err == nil {
 		for _, e := range local {
 			e.Path = path.Join("packages", e.Path)
-			keys = append(keys, e)
-			remaining--
+			add(e)
 			if remaining == 0 {
 				return keys, nil
 			}
@@ -387,8 +413,7 @@ func (s *Server) listPackages(ctx context.Context, prefix string, limit int32) (
 		}
 		for _, e := range prEntries {
 			e.Path = path.Join("packages", pr.Name, e.Name)
-			keys = append(keys, e)
-			remaining--
+			add(e)
 			if remaining == 0 {
 				return keys, nil
 			}
