@@ -61,6 +61,10 @@ func (m *mockStore) CleanupBadChecksums(ctx context.Context, prefix string) erro
 	return nil
 }
 
+func (m *mockStore) Delete(ctx context.Context, key string) error {
+	return nil
+}
+
 func TestHandleGetOK(t *testing.T) {
 	store := &mockStore{
 		getResp: &s3.GetObjectOutput{

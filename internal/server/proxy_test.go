@@ -111,6 +111,11 @@ func (m *memStore) CleanupBadChecksums(ctx context.Context, prefix string) error
 	return nil
 }
 
+func (m *memStore) Delete(ctx context.Context, key string) error {
+	delete(m.data, key)
+	return nil
+}
+
 func TestProxyAddAndList(t *testing.T) {
 	store := newMemStore()
 	pm := NewProxyManager(store, zaptest.NewLogger(t))

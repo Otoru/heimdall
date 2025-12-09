@@ -28,6 +28,7 @@ type Storage interface {
 	Head(ctx context.Context, key string) (*s3.HeadObjectOutput, error)
 	Put(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error
 	List(ctx context.Context, prefix string, limit int32) ([]storage.Entry, error)
+	Delete(ctx context.Context, key string) error
 	GenerateChecksums(ctx context.Context, prefix string) error
 	CleanupBadChecksums(ctx context.Context, prefix string) error
 }
@@ -58,6 +59,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
 	mux.HandleFunc("/catalog", s.authMiddleware(s.handleCatalog))
 	mux.HandleFunc("/proxies", s.authMiddleware(s.routeProxies))
+	mux.HandleFunc("/proxies/", s.authMiddleware(s.routeProxyByName))
 	mux.HandleFunc("/", s.authMiddleware(s.handleObject))
 
 	var handler http.Handler = mux
@@ -192,6 +194,25 @@ func (s *Server) routeProxies(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) routeProxyByName(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, "/proxies/")
+	name = strings.Trim(name, "/")
+	if name == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPut:
+		s.handleUpdateProxy(w, r, name)
+	case http.MethodDelete:
+		s.handleDeleteProxy(w, r, name)
+	default:
+		w.Header().Set("Allow", "PUT, DELETE")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // @Summary List proxy repositories
 // @Tags proxies
 // @Produce json
@@ -230,6 +251,45 @@ func (s *Server) handleCreateProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
+}
+
+// @Summary Update proxy repository
+// @Tags proxies
+// @Accept json
+// @Produce json
+// @Param name path string true "Proxy name"
+// @Param proxy body Proxy true "Proxy configuration"
+// @Success 200 {string} string "Updated"
+// @Failure 400 {string} string
+// @Security BasicAuth
+// @Router /proxies/{name} [put]
+func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request, name string) {
+	var pr Proxy
+	if err := json.NewDecoder(r.Body).Decode(&pr); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := s.proxy.Update(r.Context(), name, pr); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// @Summary Delete proxy repository
+// @Tags proxies
+// @Produce plain
+// @Param name path string true "Proxy name"
+// @Success 204 {string} string "Deleted"
+// @Failure 400 {string} string
+// @Security BasicAuth
+// @Router /proxies/{name} [delete]
+func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, name string) {
+	if err := s.proxy.Delete(r.Context(), name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) maybeListProxy(ctx context.Context, prefix string, limit int32) ([]storage.Entry, bool, error) {

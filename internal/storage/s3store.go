@@ -183,6 +183,18 @@ func (s *Store) Put(ctx context.Context, key string, body io.ReadSeeker, content
 	return nil
 }
 
+func (s *Store) Delete(ctx context.Context, key string) error {
+	k, err := s.cleanKey(key)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(k),
+	})
+	return err
+}
+
 func (s *Store) putAbsolute(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error {
 	putInput := &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),

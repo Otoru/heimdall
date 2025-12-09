@@ -108,6 +108,24 @@ func (p *ProxyManager) Add(ctx context.Context, proxy Proxy) error {
 	return p.store.Put(ctx, cfgKey, strings.NewReader(string(data)), "application/json", int64(len(data)))
 }
 
+func (p *ProxyManager) Delete(ctx context.Context, name string) error {
+	if name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if !proxyNameRe.MatchString(name) {
+		return fmt.Errorf("invalid name")
+	}
+	base := path.Join(proxyConfigPrefix, name+".json")
+	_ = p.store.Delete(ctx, base+".sha1")
+	_ = p.store.Delete(ctx, base+".md5")
+	return p.store.Delete(ctx, base)
+}
+
+func (p *ProxyManager) Update(ctx context.Context, name string, proxy Proxy) error {
+	proxy.Name = name
+	return p.Add(ctx, proxy)
+}
+
 func (p *ProxyManager) findByName(ctx context.Context, name string) (Proxy, bool, error) {
 	list, err := p.List(ctx)
 	if err != nil {
