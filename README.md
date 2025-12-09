@@ -38,6 +38,8 @@ Lightweight Maven-compatible HTTP server in Go. Serves artifacts from an S3-comp
 | `/metrics` | GET | Prometheus metrics (on `METRICS_ADDR`). |
 | `/catalog` | GET | Lists entries (non-recursive) with `type` = `file`/`dir`/`proxy`. |
 | `/proxies` | GET/POST | List or add proxy repositories. |
+| `/proxies/{name}` | PUT/DELETE | Update or delete a proxy. |
+| `/packages/{any}` | GET/HEAD | Group view: search local, then proxies (Maven-compatible). |
 | `/{any}` | GET/HEAD/PUT | Maven artifact fetch/head/upload mapped to S3 key. |
 
 ## Run locally

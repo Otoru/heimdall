@@ -126,6 +126,42 @@ func (p *ProxyManager) Update(ctx context.Context, name string, proxy Proxy) err
 	return p.Add(ctx, proxy)
 }
 
+func (p *ProxyManager) FetchFromAny(ctx context.Context, artifactPath string) (string, bool, error) {
+	proxies, err := p.List(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, pr := range proxies {
+		key := path.Join(pr.Name, artifactPath)
+		found, err := p.FetchAndCache(ctx, key)
+		if err != nil {
+			return "", false, err
+		}
+		if found {
+			return key, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func (p *ProxyManager) HeadFromAny(ctx context.Context, artifactPath string) (*http.Response, bool, error) {
+	proxies, err := p.List(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, pr := range proxies {
+		key := path.Join(pr.Name, artifactPath)
+		resp, found, err := p.Head(ctx, key)
+		if err != nil {
+			return nil, false, err
+		}
+		if found {
+			return resp, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
 func (p *ProxyManager) findByName(ctx context.Context, name string) (Proxy, bool, error) {
 	list, err := p.List(ctx)
 	if err != nil {

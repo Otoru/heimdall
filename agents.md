@@ -7,6 +7,7 @@ This repo is a Maven-compatible HTTP server backed by S3. Key capabilities:
 - Prometheus metrics on a dedicated listener.
 - Maven proxy with S3 cache: on-demand fetch from upstream (e.g., Maven Central), catalog browsing via parsed HTML listings, and no chained checksum generation when fetching checksum files.
 - Proxy management API: `GET/POST /proxies` (create), `PUT/DELETE /proxies/{name}` (update/delete). Proxy configs live in S3 under `__proxycfg__/`.
+- Group endpoint: `/packages/{path}` serves Maven artifacts by checking local first, then proxies (Maven-compatible). Catalog `path=packages/...` merges local + proxy listings.
 - Catalog: `GET /catalog?path=...&limit=...` returns entries (`file`/`dir`/`proxy`), including proxy paths.
 - Swagger UI at `/swagger/`; docs generated with `swag` (`cmd/heimdall/main.go`).
 

@@ -60,6 +60,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/catalog", s.authMiddleware(s.handleCatalog))
 	mux.HandleFunc("/proxies", s.authMiddleware(s.routeProxies))
 	mux.HandleFunc("/proxies/", s.authMiddleware(s.routeProxyByName))
+	mux.HandleFunc("/packages/", s.authMiddleware(s.handlePackages))
 	mux.HandleFunc("/", s.authMiddleware(s.handleObject))
 
 	var handler http.Handler = mux
@@ -120,6 +121,20 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 && parsed <= 1000 {
 			limit = int32(parsed)
 		}
+	}
+
+	if strings.HasPrefix(strings.TrimPrefix(prefix, "/"), "packages") {
+		keys, err := s.listPackages(r.Context(), prefix, limit)
+		if err != nil {
+			s.writeError(w, "list packages", err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		if err := json.NewEncoder(w).Encode(keys); err != nil {
+			s.logger.Warn("encode catalog", zap.Error(err))
+		}
+		return
 	}
 
 	keys, err := s.store.List(r.Context(), prefix, limit)
@@ -292,6 +307,30 @@ func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, name 
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// @Summary Group repository (packages) GET/HEAD
+// @Tags packages
+// @Produce application/octet-stream
+// @Failure 404 {string} string "Not Found"
+// @Security BasicAuth
+// @Router /packages/{artifactPath} [get]
+// @Router /packages/{artifactPath} [head]
+func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
+	key := strings.TrimPrefix(r.URL.Path, "/packages/")
+	if key == "" || key == "packages" {
+		http.NotFound(w, r)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.handlePackageGet(w, r, key)
+	case http.MethodHead:
+		s.handlePackageHead(w, r, key)
+	default:
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) maybeListProxy(ctx context.Context, prefix string, limit int32) ([]storage.Entry, bool, error) {
 	clean := strings.TrimPrefix(strings.TrimSpace(prefix), "/")
 	if clean == "" {
@@ -307,6 +346,194 @@ func (s *Server) maybeListProxy(ctx context.Context, prefix string, limit int32)
 		entries[i].Path = path.Join(clean, entries[i].Name)
 	}
 	return entries, true, nil
+}
+
+func (s *Server) listPackages(ctx context.Context, prefix string, limit int32) ([]storage.Entry, error) {
+	clean := strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	clean = strings.TrimPrefix(clean, "packages")
+	clean = strings.TrimPrefix(clean, "/")
+
+	var keys []storage.Entry
+	remaining := limit
+	if remaining <= 0 {
+		remaining = 100
+	}
+
+	// local
+	local, err := s.store.List(ctx, clean, remaining)
+	if err == nil {
+		for _, e := range local {
+			e.Path = path.Join("packages", e.Path)
+			keys = append(keys, e)
+			remaining--
+			if remaining == 0 {
+				return keys, nil
+			}
+		}
+	} else {
+		s.logger.Warn("list packages local", zap.Error(err))
+	}
+
+	// proxies
+	proxies, err := s.proxy.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, pr := range proxies {
+		prEntries, _, err := s.proxy.ListPath(ctx, path.Join(pr.Name, clean), remaining)
+		if err != nil {
+			s.logger.Warn("list packages proxy", zap.String("proxy", pr.Name), zap.Error(err))
+			continue
+		}
+		for _, e := range prEntries {
+			e.Path = path.Join("packages", pr.Name, e.Name)
+			keys = append(keys, e)
+			remaining--
+			if remaining == 0 {
+				return keys, nil
+			}
+		}
+	}
+
+	return keys, nil
+}
+
+func (s *Server) handlePackageGet(w http.ResponseWriter, r *http.Request, key string) {
+	// local direct
+	resp, err := s.store.Get(r.Context(), key)
+	if err == nil {
+		defer resp.Body.Close()
+		s.writeObjectResponse(w, resp)
+		return
+	}
+
+	if err != nil && !storage.IsNotFound(err) {
+		s.writeError(w, "fetch object", err)
+		return
+	}
+
+	// check cached proxies
+	proxies, err := s.proxy.List(r.Context())
+	if err != nil {
+		s.writeError(w, "list proxies", err)
+		return
+	}
+	for _, pr := range proxies {
+		resp, err := s.store.Get(r.Context(), path.Join(pr.Name, key))
+		if err == nil {
+			defer resp.Body.Close()
+			s.writeObjectResponse(w, resp)
+			return
+		}
+		if err != nil && !storage.IsNotFound(err) {
+			s.writeError(w, "fetch cached proxy object", err)
+			return
+		}
+	}
+
+	// fetch from upstream
+	cacheKey, found, err := s.proxy.FetchFromAny(r.Context(), key)
+	if err != nil {
+		s.writeError(w, "proxy fetch", err)
+		return
+	}
+	if !found {
+		http.NotFound(w, r)
+		return
+	}
+	resp, err = s.store.Get(r.Context(), cacheKey)
+	if err != nil {
+		s.writeError(w, "fetch cached proxy object", err)
+		return
+	}
+	defer resp.Body.Close()
+	s.writeObjectResponse(w, resp)
+}
+
+func (s *Server) handlePackageHead(w http.ResponseWriter, r *http.Request, key string) {
+	resp, err := s.store.Head(r.Context(), key)
+	if err == nil {
+		s.writeHeadResponse(w, resp)
+		return
+	}
+	if err != nil && !storage.IsNotFound(err) {
+		s.writeError(w, "head object", err)
+		return
+	}
+
+	proxies, err := s.proxy.List(r.Context())
+	if err != nil {
+		s.writeError(w, "list proxies", err)
+		return
+	}
+	for _, pr := range proxies {
+		resp, err := s.store.Head(r.Context(), path.Join(pr.Name, key))
+		if err == nil {
+			s.writeHeadResponse(w, resp)
+			return
+		}
+		if err != nil && !storage.IsNotFound(err) {
+			s.writeError(w, "head cached proxy object", err)
+			return
+		}
+	}
+
+	presp, found, err := s.proxy.HeadFromAny(r.Context(), key)
+	if err != nil {
+		s.writeError(w, "proxy head", err)
+		return
+	}
+	if found {
+		defer presp.Body.Close()
+		if cl := presp.Header.Get("Content-Length"); cl != "" {
+			w.Header().Set("Content-Length", cl)
+		}
+		if ct := presp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		if lm := presp.Header.Get("Last-Modified"); lm != "" {
+			w.Header().Set("Last-Modified", lm)
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	http.NotFound(w, r)
+}
+
+func (s *Server) writeHeadResponse(w http.ResponseWriter, resp *s3.HeadObjectOutput) {
+	if resp.ContentLength != nil && *resp.ContentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(*resp.ContentLength, 10))
+	}
+	if resp.ContentType != nil {
+		w.Header().Set("Content-Type", *resp.ContentType)
+	}
+	if resp.ETag != nil {
+		w.Header().Set("ETag", strings.Trim(*resp.ETag, "\""))
+	}
+	if resp.LastModified != nil {
+		w.Header().Set("Last-Modified", resp.LastModified.UTC().Format(http.TimeFormat))
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) writeObjectResponse(w http.ResponseWriter, resp *s3.GetObjectOutput) {
+	if resp.ContentLength != nil && *resp.ContentLength >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(*resp.ContentLength, 10))
+	}
+	if resp.ContentType != nil {
+		w.Header().Set("Content-Type", *resp.ContentType)
+	}
+	if resp.ETag != nil {
+		w.Header().Set("ETag", strings.Trim(*resp.ETag, "\""))
+	}
+	if resp.LastModified != nil {
+		w.Header().Set("Last-Modified", resp.LastModified.UTC().Format(http.TimeFormat))
+	}
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		s.logger.Warn("stream object", zap.Error(err))
+	}
 }
 
 func (s *Server) handleObject(w http.ResponseWriter, r *http.Request) {
