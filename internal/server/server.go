@@ -468,6 +468,10 @@ func (s *Server) handlePackageGet(w http.ResponseWriter, r *http.Request, key st
 	}
 	resp, err = s.store.Get(r.Context(), cacheKey)
 	if err != nil {
+		if storage.IsNotFound(err) {
+			http.NotFound(w, r)
+			return
+		}
 		s.writeError(w, "fetch cached proxy object", err)
 		return
 	}
@@ -758,7 +762,12 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 }
 
 func (s *Server) writeError(w http.ResponseWriter, action string, err error) {
-	if se, ok := err.(ProxyStatusError); ok {
+	if storage.IsNotFound(err) {
+		http.NotFound(w, nil)
+		return
+	}
+	var se ProxyStatusError
+	if errors.As(err, &se) {
 		http.Error(w, http.StatusText(se.Code), se.Code)
 		return
 	}

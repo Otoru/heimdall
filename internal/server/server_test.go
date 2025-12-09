@@ -221,6 +221,25 @@ func TestHandleGetNotFound(t *testing.T) {
 	}
 }
 
+func TestWriteErrorProxyStatus(t *testing.T) {
+	rr := httptest.NewRecorder()
+	srv := New(&mockStore{}, zaptest.NewLogger(t), metrics.New(), "", "")
+	srv.writeError(rr, "proxy fetch", ProxyStatusError{Code: http.StatusForbidden})
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestWriteErrorProxyStatusPointer(t *testing.T) {
+	rr := httptest.NewRecorder()
+	srv := New(&mockStore{}, zaptest.NewLogger(t), metrics.New(), "", "")
+	err := fmt.Errorf("wrapped: %w", ProxyStatusError{Code: http.StatusUnauthorized})
+	srv.writeError(rr, "proxy fetch", err)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", rr.Code)
+	}
+}
+
 func TestMetricsIncrement(t *testing.T) {
 	m := metrics.New()
 	store := &mockStore{
