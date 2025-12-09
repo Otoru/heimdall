@@ -88,7 +88,7 @@ func (s *listStore) Get(ctx context.Context, key string) (*s3.GetObjectOutput, e
 			ContentType:   aws.String("application/json"),
 		}, nil
 	}
-	return nil, fmt.Errorf("not found")
+	return nil, fmt.Errorf("NotFound")
 }
 
 func (s *listStore) Head(ctx context.Context, key string) (*s3.HeadObjectOutput, error) {
@@ -98,7 +98,7 @@ func (s *listStore) Head(ctx context.Context, key string) (*s3.HeadObjectOutput,
 			ContentType:   aws.String("application/json"),
 		}, nil
 	}
-	return nil, fmt.Errorf("not found")
+	return nil, fmt.Errorf("NotFound")
 }
 
 func (s *listStore) Put(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error {
@@ -342,5 +342,68 @@ func TestCatalogPackagesFiltersProxyCfg(t *testing.T) {
 		if e.Type == "dir" && !strings.HasSuffix(e.Name, "/") {
 			t.Fatalf("dir missing trailing slash: %+v", e)
 		}
+	}
+}
+
+func TestPackagesGetLocal(t *testing.T) {
+	store := newListStore()
+	store.objects["com/acme/app/1.0/app-1.0.jar"] = []byte("LOCAL")
+
+	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
+	req := httptest.NewRequest(http.MethodGet, "/packages/com/acme/app/1.0/app-1.0.jar", nil)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if body := rr.Body.String(); body != "LOCAL" {
+		t.Fatalf("unexpected body %q", body)
+	}
+}
+
+func TestPackagesGetCachedProxy(t *testing.T) {
+	store := newListStore()
+	store.listByPrefix["__proxycfg__/"] = []storage.Entry{
+		{Name: "central.json", Path: "__proxycfg__/central.json", Type: "file"},
+	}
+	store.objects["__proxycfg__/central.json"] = []byte(`{"name":"central","url":"https://repo.maven.apache.org/maven2"}`)
+	key := "com/acme/app/1.0/app-1.0.jar"
+	store.objects["central/"+key] = []byte("CACHED")
+
+	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
+	srv.proxy = NewProxyManager(store, zaptest.NewLogger(t))
+
+	req := httptest.NewRequest(http.MethodGet, "/packages/"+key, nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if body := rr.Body.String(); body != "CACHED" {
+		t.Fatalf("unexpected body %q", body)
+	}
+}
+
+func TestPackagesHeadLocal(t *testing.T) {
+	store := newListStore()
+	store.objects["com/acme/app/1.0/app-1.0.jar"] = []byte("LOCAL")
+
+	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
+	req := httptest.NewRequest(http.MethodHead, "/packages/com/acme/app/1.0/app-1.0.jar", nil)
+	rr := httptest.NewRecorder()
+
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("expected empty body on HEAD")
+	}
+	if rr.Header().Get("Content-Length") == "" {
+		t.Fatalf("expected content-length header")
 	}
 }
