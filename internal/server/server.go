@@ -424,16 +424,11 @@ func (s *Server) listPackages(ctx context.Context, prefix string, limit int32) (
 }
 
 func (s *Server) handlePackageGet(w http.ResponseWriter, r *http.Request, key string) {
+	var resp *s3.GetObjectOutput
 	// local direct
-	resp, err := s.store.Get(r.Context(), key)
-	if err == nil {
+	if resp, ok := s.tryLocalGet(r.Context(), key); ok {
 		defer resp.Body.Close()
 		s.writeObjectResponse(w, resp)
-		return
-	}
-
-	if err != nil && !storage.IsNotFound(err) {
-		s.writeError(w, "fetch object", err)
 		return
 	}
 
@@ -480,13 +475,8 @@ func (s *Server) handlePackageGet(w http.ResponseWriter, r *http.Request, key st
 }
 
 func (s *Server) handlePackageHead(w http.ResponseWriter, r *http.Request, key string) {
-	resp, err := s.store.Head(r.Context(), key)
-	if err == nil {
+	if resp, ok := s.tryLocalHead(r.Context(), key); ok {
 		s.writeHeadResponse(w, resp)
-		return
-	}
-	if err != nil && !storage.IsNotFound(err) {
-		s.writeError(w, "head object", err)
 		return
 	}
 
@@ -528,6 +518,56 @@ func (s *Server) handlePackageHead(w http.ResponseWriter, r *http.Request, key s
 	}
 
 	http.NotFound(w, r)
+}
+
+func (s *Server) tryLocalGet(ctx context.Context, key string) (*s3.GetObjectOutput, bool) {
+	resp, err := s.store.Get(ctx, key)
+	if err == nil {
+		return resp, true
+	}
+	if err != nil && !storage.IsNotFound(err) {
+		return nil, false
+	}
+
+	roots, err := s.store.List(ctx, "", 1000)
+	if err != nil {
+		return nil, false
+	}
+	for _, e := range roots {
+		if e.Type != "dir" {
+			continue
+		}
+		resp, err := s.store.Get(ctx, path.Join(e.Name, key))
+		if err == nil {
+			return resp, true
+		}
+	}
+	return nil, false
+}
+
+func (s *Server) tryLocalHead(ctx context.Context, key string) (*s3.HeadObjectOutput, bool) {
+	resp, err := s.store.Head(ctx, key)
+	if err == nil {
+		return resp, true
+	}
+	if err != nil && !storage.IsNotFound(err) {
+		return nil, false
+	}
+
+	roots, err := s.store.List(ctx, "", 1000)
+	if err != nil {
+		return nil, false
+	}
+	for _, e := range roots {
+		if e.Type != "dir" {
+			continue
+		}
+		resp, err := s.store.Head(ctx, path.Join(e.Name, key))
+		if err == nil {
+			return resp, true
+		}
+	}
+	return nil, false
 }
 
 func (s *Server) writeHeadResponse(w http.ResponseWriter, resp *s3.HeadObjectOutput) {
