@@ -1,16 +1,19 @@
 # Heimdall
 
-Lightweight Maven-compatible HTTP server written in Go. It proxies `GET`, `HEAD`, and `PUT` directly to an S3-compatible bucket (AWS or OCI), emits JSON logs with `zap`, and exposes Prometheus metrics on a dedicated listener.
+Lightweight Maven-compatible HTTP server in Go. Serves artifacts from an S3-compatible bucket (AWS/OCI/MinIO), supports proxying upstream Maven repos with S3 cache, logs in JSON (zap), and exposes Prometheus metrics.
 
-## Features
+## Features (quick view)
 
-- S3-compatible storage (AWS/OCI/MinIO) with optional path-style and prefix.
-- Maven proxy mode with on-demand fetch + cache to the same S3 bucket, managed via API.
-- Basic Auth gate (optional) for all routes except `/healthz`.
-- Structured JSON logging via `zap` (production encoder).
-- Prometheus metrics (`/metrics`) plus standard Go/process collectors.
+| Area | Details |
+| --- | --- |
+| Storage | S3-compatible, optional prefix, path-style toggle |
+| Auth | Optional Basic Auth for all routes except `/healthz` |
+| Metrics | `/metrics` on a dedicated listener |
+| Logging | JSON via zap |
+| Checksums | Auto-generate SHA1/MD5 on upload and background repair |
+| Proxy | Upstream Maven proxy with S3 cache; browse via catalog |
 
-## Configuration
+## Configuration (env vars)
 
 | Variable | Default | Required | Description |
 | --- | --- | --- | --- |
@@ -27,7 +30,7 @@ Lightweight Maven-compatible HTTP server written in Go. It proxies `GET`, `HEAD`
 | `CHECKSUM_SCAN_INTERVAL` | — | no | Background checksum repair interval (e.g. `10m`); empty disables. |
 | `CHECKSUM_SCAN_PREFIX` | — | no | Limit checksum repair scan to a prefix. |
 
-Endpoints:
+## Endpoints
 
 | Path | Method | Purpose |
 | --- | --- | --- |
@@ -105,18 +108,9 @@ docker compose up --build
 
 ## CI/CD
 
-GitHub Actions builds and pushes a multi-arch image to Docker Hub whenever an **app release** (tags like `v1.2.3`) is published. Required repository secrets:
-
-| Secret | Description |
-| --- | --- |
-| `DOCKERHUB_USERNAME` | Docker Hub username. |
-| `DOCKERHUB_TOKEN` | Docker Hub access token with push rights. |
-
-Images are tagged with the release tag (semver) and `latest`. The image name is `otoru/heimdall`.
-
-Helm charts are released independently: publish a release with tag format `chart-X.Y.Z` and the chart is packaged and pushed to GHCR (`ghcr.io/otoru/heimdall-chart`) and attached to the GitHub release.
-
-Pull requests run `go test ./...` automatically via GitHub Actions to block broken code before merging.
+- App releases (tags `vX.Y.Z`) build multi-arch images to GHCR: `ghcr.io/otoru/heimdall:<version>` and `:latest`.
+- Chart releases (tags `chart-X.Y.Z`) package and push to GHCR OCI: `oci://ghcr.io/otoru/heimdall-chart/heimdall`.
+- PRs run `go test ./...`.
 
 ## Maven config snippet
 
