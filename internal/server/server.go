@@ -758,6 +758,10 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 }
 
 func (s *Server) writeError(w http.ResponseWriter, action string, err error) {
+	if se, ok := err.(ProxyStatusError); ok {
+		http.Error(w, http.StatusText(se.Code), se.Code)
+		return
+	}
 	s.logger.Error(action, zap.Error(err))
 	http.Error(w, "internal server error", http.StatusInternalServerError)
 }

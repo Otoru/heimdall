@@ -30,6 +30,14 @@ type Proxy struct {
 	URL  string `json:"url"`
 }
 
+type ProxyStatusError struct {
+	Code int
+}
+
+func (e ProxyStatusError) Error() string {
+	return fmt.Sprintf("proxy fetch: status %d", e.Code)
+}
+
 type ProxyManager struct {
 	store      Storage
 	logger     *zap.Logger
@@ -214,7 +222,7 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 		return false, nil
 	}
 	if resp.StatusCode >= 300 {
-		return false, fmt.Errorf("proxy fetch: status %d", resp.StatusCode)
+		return false, ProxyStatusError{Code: resp.StatusCode}
 	}
 
 	tmp, err := os.CreateTemp("", "heimdall-proxy-*")

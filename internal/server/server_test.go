@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -64,6 +67,61 @@ func (m *mockStore) CleanupBadChecksums(ctx context.Context, prefix string) erro
 func (m *mockStore) Delete(ctx context.Context, key string) error {
 	return nil
 }
+
+type listStore struct {
+	listByPrefix map[string][]storage.Entry
+	objects      map[string][]byte
+}
+
+func newListStore() *listStore {
+	return &listStore{
+		listByPrefix: make(map[string][]storage.Entry),
+		objects:      make(map[string][]byte),
+	}
+}
+
+func (s *listStore) Get(ctx context.Context, key string) (*s3.GetObjectOutput, error) {
+	if b, ok := s.objects[key]; ok {
+		return &s3.GetObjectOutput{
+			Body:          io.NopCloser(bytes.NewReader(b)),
+			ContentLength: aws.Int64(int64(len(b))),
+			ContentType:   aws.String("application/json"),
+		}, nil
+	}
+	return nil, fmt.Errorf("not found")
+}
+
+func (s *listStore) Head(ctx context.Context, key string) (*s3.HeadObjectOutput, error) {
+	if b, ok := s.objects[key]; ok {
+		return &s3.HeadObjectOutput{
+			ContentLength: aws.Int64(int64(len(b))),
+			ContentType:   aws.String("application/json"),
+		}, nil
+	}
+	return nil, fmt.Errorf("not found")
+}
+
+func (s *listStore) Put(ctx context.Context, key string, body io.ReadSeeker, contentType string, contentLength int64) error {
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	s.objects[key] = data
+	return nil
+}
+
+func (s *listStore) List(ctx context.Context, prefix string, limit int32) ([]storage.Entry, error) {
+	if entries, ok := s.listByPrefix[prefix]; ok {
+		return entries, nil
+	}
+	return nil, nil
+}
+
+func (s *listStore) GenerateChecksums(ctx context.Context, prefix string) error { return nil }
+func (s *listStore) CleanupBadChecksums(ctx context.Context, prefix string) error {
+	return nil
+}
+func (s *listStore) Delete(ctx context.Context, key string) error { delete(s.objects, key); return nil }
 
 func TestHandleGetOK(t *testing.T) {
 	store := &mockStore{
@@ -212,5 +270,77 @@ func TestCatalogOK(t *testing.T) {
 	}
 	if !strings.Contains(rr.Body.String(), "a.jar") || !strings.Contains(rr.Body.String(), "b/") {
 		t.Fatalf("unexpected body: %s", rr.Body.String())
+	}
+}
+
+func TestCatalogRootShowsGroupAndFiltersProxyCfg(t *testing.T) {
+	store := newListStore()
+	store.listByPrefix[""] = []storage.Entry{
+		{Name: "__proxycfg__/", Path: "__proxycfg__/", Type: "dir"},
+		{Name: "local/", Path: "local/", Type: "dir"},
+	}
+	store.listByPrefix[proxyConfigPrefix] = []storage.Entry{
+		{Name: "central.json", Path: "__proxycfg__/central.json", Type: "file"},
+	}
+	store.objects["__proxycfg__/central.json"] = []byte(`{"name":"central","url":"https://repo.maven.apache.org/maven2"}`)
+
+	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
+	srv.proxy = NewProxyManager(store, zaptest.NewLogger(t))
+
+	req := httptest.NewRequest(http.MethodGet, "/catalog", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d", rr.Code)
+	}
+	var entries []storage.Entry
+	if err := json.NewDecoder(rr.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Path, "__proxycfg__") {
+			t.Fatalf("proxy config leaked in catalog: %+v", e)
+		}
+	}
+	foundGroup := false
+	for _, e := range entries {
+		if e.Path == "packages/" && e.Type == "group" {
+			foundGroup = true
+		}
+	}
+	if !foundGroup {
+		t.Fatalf("packages group not found in catalog root")
+	}
+}
+
+func TestCatalogPackagesFiltersProxyCfg(t *testing.T) {
+	store := newListStore()
+	store.listByPrefix[""] = []storage.Entry{
+		{Name: "__proxycfg__/", Path: "__proxycfg__/", Type: "dir"},
+		{Name: "local/", Path: "local/", Type: "dir"},
+	}
+
+	srv := New(store, zaptest.NewLogger(t), metrics.New(), "", "")
+	srv.proxy = NewProxyManager(store, zaptest.NewLogger(t)) // no proxies configured
+
+	req := httptest.NewRequest(http.MethodGet, "/catalog?path=packages", nil)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("unexpected status %d", rr.Code)
+	}
+	var entries []storage.Entry
+	if err := json.NewDecoder(rr.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Path, "__proxycfg__") {
+			t.Fatalf("proxy config leaked in packages catalog: %+v", e)
+		}
+		if e.Type == "dir" && !strings.HasSuffix(e.Name, "/") {
+			t.Fatalf("dir missing trailing slash: %+v", e)
+		}
 	}
 }
