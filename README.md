@@ -155,7 +155,7 @@ From GHCR (OCI):
 ```bash
 helm registry login ghcr.io -u <user> -p <token>
 helm install heimdall oci://ghcr.io/otoru/heimdall-chart/heimdall \
-  --version 0.5.3 \
+  --version 0.5.6 \
   --set env.S3_BUCKET=my-bucket \
   --set env.S3_REGION=us-east-1
 ```
@@ -163,7 +163,7 @@ helm install heimdall oci://ghcr.io/otoru/heimdall-chart/heimdall \
 If you want to pull manually:
 
 ```bash
-helm pull oci://ghcr.io/otoru/heimdall-chart/heimdall --version 0.5.3
+helm pull oci://ghcr.io/otoru/heimdall-chart/heimdall --version 0.5.6
 ```
 
 Notes:
