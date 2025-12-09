@@ -31,3 +31,9 @@ Notes for changes:
 - Update swagger after handler annotations: `/Users/vitor/.asdf/installs/golang/1.25.5/bin/swag init -g cmd/heimdall/main.go -o internal/docs`.
 - Avoid committing `internal/docs/swagger.json|yaml` (ignored). Only `docs.go` is tracked.
 - Chart HPA is off by default; set `autoscaling.enabled=true` to enable.
+- Checklist per change:
+  - Run `CGO_ENABLED=0 go test ./...` (or equivalent) before commit/release.
+  - Update docs/swagger via `swag init -g cmd/heimdall/main.go -o internal/docs` after changing handlers/annotations.
+  - Reflect behavior/API changes in `README.md` and `agents.md`.
+  - Bump versions with semver: app tags `vX.Y.Z` (image), chart tags `chart-X.Y.Z` (chart `appVersion` matches image tag).
+  - Verify chart defaults when changing values (HPA disabled by default).
