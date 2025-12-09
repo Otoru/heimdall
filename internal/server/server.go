@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ type Storage interface {
 
 type Server struct {
 	store   Storage
+	proxy   *ProxyManager
 	logger  *zap.Logger
 	metrics *metrics.Registry
 	user    string
@@ -42,6 +44,7 @@ type Server struct {
 func New(store Storage, logger *zap.Logger, m *metrics.Registry, user, pass string) *Server {
 	return &Server{
 		store:   store,
+		proxy:   NewProxyManager(store, logger),
 		logger:  logger,
 		metrics: m,
 		user:    user,
@@ -54,6 +57,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealth)
 	mux.Handle("/swagger/", httpSwagger.WrapHandler)
 	mux.HandleFunc("/catalog", s.authMiddleware(s.handleCatalog))
+	mux.HandleFunc("/proxies", s.authMiddleware(s.routeProxies))
 	mux.HandleFunc("/", s.authMiddleware(s.handleObject))
 
 	var handler http.Handler = mux
@@ -104,7 +108,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // @Param path query string false "Path prefix (non-recursive); root by default"
 // @Param limit query int false "Max items" default(100)
 // @Produce json
-// @Success 200 {array} string
+// @Success 200 {array} storage.Entry
 // @Security BasicAuth
 // @Router /catalog [get]
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
@@ -122,11 +126,127 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if prEntries, handled, err := s.maybeListProxy(r.Context(), prefix, limit); err == nil && handled {
+		// merge proxy entries with any cached local items for this prefix
+		merged := append([]storage.Entry{}, prEntries...)
+		existing := map[string]struct{}{}
+		for _, e := range merged {
+			existing[e.Name] = struct{}{}
+		}
+		for _, e := range keys {
+			if strings.HasPrefix(e.Path, proxyConfigPrefix) {
+				continue
+			}
+			if _, ok := existing[e.Name]; ok {
+				continue
+			}
+			merged = append(merged, e)
+		}
+		keys = merged
+	} else if err != nil {
+		s.logger.Warn("list proxy path", zap.Error(err))
+	}
+
+	var filtered []storage.Entry
+	for _, k := range keys {
+		if strings.HasPrefix(k.Path, proxyConfigPrefix) {
+			continue
+		}
+		filtered = append(filtered, k)
+	}
+	keys = filtered
+	if keys == nil {
+		keys = []storage.Entry{}
+	}
+
+	if prefix == "" || prefix == "/" {
+		if proxies, err := s.proxy.List(r.Context()); err == nil {
+			for _, pr := range proxies {
+				keys = append(keys, storage.Entry{
+					Name: pr.Name + "/",
+					Path: pr.Name + "/",
+					Type: "proxy",
+				})
+			}
+		} else {
+			s.logger.Warn("list proxies for catalog", zap.Error(err))
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if err := json.NewEncoder(w).Encode(keys); err != nil {
 		s.logger.Warn("encode catalog", zap.Error(err))
 	}
+}
+
+func (s *Server) routeProxies(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.handleListProxies(w, r)
+	case http.MethodPost:
+		s.handleCreateProxy(w, r)
+	default:
+		w.Header().Set("Allow", "GET, POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// @Summary List proxy repositories
+// @Tags proxies
+// @Produce json
+// @Success 200 {array} server.Proxy
+// @Security BasicAuth
+// @Router /proxies [get]
+func (s *Server) handleListProxies(w http.ResponseWriter, r *http.Request) {
+	proxies, err := s.proxy.List(r.Context())
+	if err != nil {
+		s.writeError(w, "list proxies", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(proxies); err != nil {
+		s.logger.Warn("encode proxies", zap.Error(err))
+	}
+}
+
+// @Summary Create proxy repository
+// @Tags proxies
+// @Accept json
+// @Produce json
+// @Param proxy body Proxy true "Proxy configuration"
+// @Success 201 {string} string "Created"
+// @Failure 400 {string} string
+// @Security BasicAuth
+// @Router /proxies [post]
+func (s *Server) handleCreateProxy(w http.ResponseWriter, r *http.Request) {
+	var pr Proxy
+	if err := json.NewDecoder(r.Body).Decode(&pr); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := s.proxy.Add(r.Context(), pr); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) maybeListProxy(ctx context.Context, prefix string, limit int32) ([]storage.Entry, bool, error) {
+	clean := strings.TrimPrefix(strings.TrimSpace(prefix), "/")
+	if clean == "" {
+		return nil, false, nil
+	}
+
+	entries, handled, err := s.proxy.ListPath(ctx, clean, limit)
+	if err != nil || !handled {
+		return entries, handled, err
+	}
+
+	for i := range entries {
+		entries[i].Path = path.Join(clean, entries[i].Name)
+	}
+	return entries, true, nil
 }
 
 func (s *Server) handleObject(w http.ResponseWriter, r *http.Request) {
@@ -161,11 +281,24 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 	resp, err := s.store.Get(r.Context(), key)
 	if err != nil {
 		if storage.IsNotFound(err) {
-			http.NotFound(w, r)
+			if found, perr := s.proxy.FetchAndCache(r.Context(), key); perr != nil {
+				s.writeError(w, "proxy fetch", perr)
+				return
+			} else if found {
+				resp, err = s.store.Get(r.Context(), key)
+				if err != nil {
+					s.writeError(w, "fetch cached proxy object", err)
+					return
+				}
+				defer resp.Body.Close()
+			} else {
+				http.NotFound(w, r)
+				return
+			}
+		} else {
+			s.writeError(w, "fetch object", err)
 			return
 		}
-		s.writeError(w, "fetch object", err)
-		return
 	}
 	defer resp.Body.Close()
 
@@ -199,6 +332,23 @@ func (s *Server) handleHead(w http.ResponseWriter, r *http.Request, key string) 
 	resp, err := s.store.Head(r.Context(), key)
 	if err != nil {
 		if storage.IsNotFound(err) {
+			if presp, found, perr := s.proxy.Head(r.Context(), key); perr != nil {
+				s.writeError(w, "proxy head", perr)
+				return
+			} else if found {
+				defer presp.Body.Close()
+				if cl := presp.Header.Get("Content-Length"); cl != "" {
+					w.Header().Set("Content-Length", cl)
+				}
+				if ct := presp.Header.Get("Content-Type"); ct != "" {
+					w.Header().Set("Content-Type", ct)
+				}
+				if lm := presp.Header.Get("Last-Modified"); lm != "" {
+					w.Header().Set("Last-Modified", lm)
+				}
+				w.WriteHeader(http.StatusOK)
+				return
+			}
 			http.NotFound(w, r)
 			return
 		}

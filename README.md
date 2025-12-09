@@ -5,6 +5,7 @@ Lightweight Maven-compatible HTTP server written in Go. It proxies `GET`, `HEAD`
 ## Features
 
 - S3-compatible storage (AWS/OCI/MinIO) with optional path-style and prefix.
+- Maven proxy mode with on-demand fetch + cache to the same S3 bucket, managed via API.
 - Basic Auth gate (optional) for all routes except `/healthz`.
 - Structured JSON logging via `zap` (production encoder).
 - Prometheus metrics (`/metrics`) plus standard Go/process collectors.
@@ -32,6 +33,8 @@ Endpoints:
 | --- | --- | --- |
 | `/healthz` | GET | Liveness probe. |
 | `/metrics` | GET | Prometheus metrics (on `METRICS_ADDR`). |
+| `/catalog` | GET | Lists entries (non-recursive) with `type` = `file`/`dir`/`proxy`. |
+| `/proxies` | GET/POST | List or add proxy repositories. |
 | `/{any}` | GET/HEAD/PUT | Maven artifact fetch/head/upload mapped to S3 key. |
 
 ## Run locally
@@ -58,6 +61,25 @@ Download/check:
 
 ```bash
 curl -I http://localhost:8080/releases/com/acme/app/1.0.0/app-1.0.0.jar
+```
+
+### Proxy repositories (cache in S3)
+
+Add a proxy (persisted as `__proxycfg__/<name>.json` in S3, shared by all replicas):
+
+```bash
+curl -u user:pass -X POST http://localhost:8080/proxies \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"central","url":"https://repo.maven.apache.org/maven2"}'
+```
+
+Browse: `curl -u user:pass http://localhost:8080/catalog` shows proxies with `type: "proxy"`.
+Listing a proxy path (`path=central/...`) shows upstream directory entries (non-recursive) even before caching.
+
+Fetch via proxy (cached to S3 on first hit):
+
+```bash
+curl -I http://localhost:8080/central/org/apache/maven/maven/3.9.6/maven-3.9.6.pom
 ```
 
 ## Docker
@@ -139,7 +161,7 @@ From GHCR (OCI):
 ```bash
 helm registry login ghcr.io -u <user> -p <token>
 helm install heimdall oci://ghcr.io/otoru/heimdall-chart/heimdall \
-  --version 0.3.0 \
+  --version 0.5.3 \
   --set env.S3_BUCKET=my-bucket \
   --set env.S3_REGION=us-east-1
 ```
@@ -147,7 +169,7 @@ helm install heimdall oci://ghcr.io/otoru/heimdall-chart/heimdall \
 If you want to pull manually:
 
 ```bash
-helm pull oci://ghcr.io/otoru/heimdall-chart/heimdall --version 0.3.0
+helm pull oci://ghcr.io/otoru/heimdall-chart/heimdall --version 0.5.3
 ```
 
 Notes:

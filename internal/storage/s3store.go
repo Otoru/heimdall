@@ -41,7 +41,7 @@ type Store struct {
 type Entry struct {
 	Name string `json:"name"`
 	Path string `json:"path"`
-	Type string `json:"type"` // file or dir
+	Type string `json:"type"` // file, dir, proxy
 	Size int64  `json:"size,omitempty"`
 }
 
