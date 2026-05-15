@@ -252,108 +252,136 @@ func (s *Store) putAbsolute(ctx context.Context, key string, body io.ReadSeeker,
 	return nil
 }
 
-func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]Entry, error) {
+func buildListPrefix(prefix, storePrefix string) string {
 	p := strings.TrimPrefix(path.Clean("/"+prefix), "/")
 	if p != "" && !strings.HasSuffix(p, "/") {
 		p += "/"
 	}
-	if s.prefix != "" {
-		p = strings.TrimPrefix(path.Join(s.prefix, p), "/")
+	if storePrefix != "" {
+		p = strings.TrimPrefix(path.Join(storePrefix, p), "/")
 		if p != "" && !strings.HasSuffix(p, "/") {
 			p += "/"
 		}
 	}
+	return p
+}
 
+func appendCommonPrefixes(keys []Entry, prefixes []types.CommonPrefix, p, basePath string) []Entry {
+	for _, cp := range prefixes {
+		if cp.Prefix == nil {
+			continue
+		}
+		k := strings.TrimSuffix(strings.TrimPrefix(*cp.Prefix, p), "/")
+		if k != "" {
+			keys = append(keys, Entry{Name: k + "/", Path: path.Join(basePath, k) + "/", Type: "dir"})
+		}
+	}
+	return keys
+}
+
+func objectSize(obj types.Object) int64 {
+	if obj.Size != nil {
+		return *obj.Size
+	}
+	return 0
+}
+
+func appendObjects(keys []Entry, objects []types.Object, p, basePath string) []Entry {
+	for _, obj := range objects {
+		if obj.Key == nil {
+			continue
+		}
+		if *obj.Key == p || *obj.Key == strings.TrimSuffix(p, "/") {
+			continue
+		}
+		k := strings.TrimPrefix(*obj.Key, p)
+		if strings.Contains(k, "/") || k == "" {
+			continue
+		}
+		keys = append(keys, Entry{Name: k, Path: path.Join(basePath, k), Type: "file", Size: objectSize(obj)})
+	}
+	return keys
+}
+
+func isTruncated(out *s3.ListObjectsV2Output) bool {
+	return out.IsTruncated != nil && *out.IsTruncated && out.NextContinuationToken != nil
+}
+
+func (s *Store) List(ctx context.Context, prefix string, limit int32) ([]Entry, error) {
+	p := buildListPrefix(prefix, s.prefix)
 	if limit <= 0 {
 		limit = 100
 	}
-
-	var keys []Entry
 	basePath := strings.TrimSuffix(p, "/")
-	var token *string
-
+	var (
+		keys  []Entry
+		token *string
+	)
 	for {
-		pageLimit := limit
-		remaining := limit - int32(len(keys))
-		if remaining > 0 {
-			pageLimit = remaining
-		}
-
 		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
 			Prefix:            aws.String(p),
-			MaxKeys:           aws.Int32(pageLimit),
+			MaxKeys:           aws.Int32(limit - int32(len(keys))),
 			Delimiter:         aws.String("/"),
 			ContinuationToken: token,
 		})
 		if err != nil {
 			return nil, err
 		}
-
-		for _, cp := range out.CommonPrefixes {
-			if cp.Prefix == nil {
-				continue
-			}
-			k := strings.TrimPrefix(*cp.Prefix, p)
-			k = strings.TrimSuffix(k, "/")
-			if k != "" {
-				keys = append(keys, Entry{
-					Name: k + "/",
-					Path: path.Join(basePath, k) + "/",
-					Type: "dir",
-				})
-			}
-		}
-		for _, obj := range out.Contents {
-			if obj.Key == nil {
-				continue
-			}
-			if *obj.Key == p || *obj.Key == strings.TrimSuffix(p, "/") {
-				continue
-			}
-			k := strings.TrimPrefix(*obj.Key, p)
-			if strings.Contains(k, "/") {
-				// deeper levels ignored because of delimiter; should not happen
-				continue
-			}
-			if k != "" {
-				size := int64(0)
-				if obj.Size != nil {
-					size = *obj.Size
-				}
-				keys = append(keys, Entry{
-					Name: k,
-					Path: path.Join(basePath, k),
-					Type: "file",
-					Size: size,
-				})
-			}
-		}
-
-		if int32(len(keys)) >= limit {
-			keys = keys[:limit]
+		keys = appendCommonPrefixes(keys, out.CommonPrefixes, p, basePath)
+		keys = appendObjects(keys, out.Contents, p, basePath)
+		if int32(len(keys)) >= limit || !isTruncated(out) {
 			break
 		}
-
-		if out.IsTruncated != nil && *out.IsTruncated && out.NextContinuationToken != nil {
-			token = out.NextContinuationToken
-			continue
-		}
-		break
+		token = out.NextContinuationToken
 	}
-
+	if int32(len(keys)) > limit {
+		keys = keys[:limit]
+	}
 	return keys, nil
 }
 
-func (s *Store) GenerateChecksums(ctx context.Context, prefix string) error {
+func normalizeScanPrefix(prefix, storePrefix string) string {
 	p := strings.TrimPrefix(path.Clean("/"+prefix), "/")
-	if s.prefix != "" {
-		p = path.Join(s.prefix, p)
+	if storePrefix != "" {
+		p = path.Join(storePrefix, p)
 	}
-	p = strings.TrimPrefix(p, "/")
+	return strings.TrimPrefix(p, "/")
+}
 
+func isChecksumFile(key string) bool {
+	return strings.HasSuffix(key, "/") || strings.HasSuffix(key, ".sha1") || strings.HasSuffix(key, ".md5")
+}
+
+func (s *Store) needsChecksum(ctx context.Context, key string) (bool, error) {
+	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+	})
+	if err == nil {
+		return false, nil
+	}
+	if IsNotFound(err) {
+		return true, nil
+	}
+	return false, err
+}
+
+func (s *Store) deleteIfBadChecksum(ctx context.Context, key string, badSuffixes []string) {
+	for _, suf := range badSuffixes {
+		if strings.HasSuffix(key, suf) {
+			_, _ = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+				Bucket: aws.String(s.bucket),
+				Key:    aws.String(key),
+			})
+			return
+		}
+	}
+}
+
+func (s *Store) GenerateChecksums(ctx context.Context, prefix string) error {
+	p := normalizeScanPrefix(prefix, s.prefix)
 	var token *string
-
 	for {
 		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
@@ -363,41 +391,26 @@ func (s *Store) GenerateChecksums(ctx context.Context, prefix string) error {
 		if err != nil {
 			return err
 		}
-
 		for _, obj := range out.Contents {
-			if obj.Key == nil {
+			if obj.Key == nil || isChecksumFile(*obj.Key) {
 				continue
 			}
-			key := *obj.Key
-			if strings.HasSuffix(key, "/") || strings.HasSuffix(key, ".sha1") || strings.HasSuffix(key, ".md5") {
-				continue
-			}
-
-			if err := s.ensureChecksums(ctx, key); err != nil {
+			if err := s.ensureChecksums(ctx, *obj.Key); err != nil {
 				return err
 			}
 		}
-
-		if out.IsTruncated != nil && *out.IsTruncated && out.NextContinuationToken != nil {
-			token = out.NextContinuationToken
-			continue
+		if !isTruncated(out) {
+			break
 		}
-		break
+		token = out.NextContinuationToken
 	}
-
 	return nil
 }
 
 func (s *Store) CleanupBadChecksums(ctx context.Context, prefix string) error {
-	p := strings.TrimPrefix(path.Clean("/"+prefix), "/")
-	if s.prefix != "" {
-		p = path.Join(s.prefix, p)
-	}
-	p = strings.TrimPrefix(p, "/")
-
-	var token *string
+	p := normalizeScanPrefix(prefix, s.prefix)
 	badSuffixes := []string{".sha1.sha1", ".sha1.md5", ".md5.sha1", ".md5.md5"}
-
+	var token *string
 	for {
 		out, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.bucket),
@@ -407,59 +420,28 @@ func (s *Store) CleanupBadChecksums(ctx context.Context, prefix string) error {
 		if err != nil {
 			return err
 		}
-
 		for _, obj := range out.Contents {
-			if obj.Key == nil {
-				continue
-			}
-			key := *obj.Key
-			for _, suf := range badSuffixes {
-				if strings.HasSuffix(key, suf) {
-					_, _ = s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
-						Bucket: aws.String(s.bucket),
-						Key:    aws.String(key),
-					})
-					break
-				}
+			if obj.Key != nil {
+				s.deleteIfBadChecksum(ctx, *obj.Key, badSuffixes)
 			}
 		}
-
-		if out.IsTruncated != nil && *out.IsTruncated && out.NextContinuationToken != nil {
-			token = out.NextContinuationToken
-			continue
+		if !isTruncated(out) {
+			break
 		}
-		break
+		token = out.NextContinuationToken
 	}
-
 	return nil
 }
 
 func (s *Store) ensureChecksums(ctx context.Context, key string) error {
-	needsSha1 := false
-	needsMd5 := false
-
-	if _, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key + ".sha1"),
-	}); err != nil {
-		if IsNotFound(err) {
-			needsSha1 = true
-		} else {
-			return err
-		}
+	needsSha1, err := s.needsChecksum(ctx, key+".sha1")
+	if err != nil {
+		return err
 	}
-
-	if _, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(key + ".md5"),
-	}); err != nil {
-		if IsNotFound(err) {
-			needsMd5 = true
-		} else {
-			return err
-		}
+	needsMd5, err := s.needsChecksum(ctx, key+".md5")
+	if err != nil {
+		return err
 	}
-
 	if !needsSha1 && !needsMd5 {
 		return nil
 	}

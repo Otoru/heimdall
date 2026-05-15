@@ -17,8 +17,10 @@ type Config struct {
 	SecretKey    string
 	UsePathStyle bool
 	Prefix       string
-	AuthUser     string
-	AuthPassword string
+	AuthUser        string
+	AuthPassword    string
+	APIKeyEndpoint  string
+	APIKeyToken     string
 	ChecksumScanInterval string
 	ChecksumScanPrefix   string
 }
@@ -32,8 +34,10 @@ func Load() (Config, error) {
 		AccessKey:    os.Getenv("S3_ACCESS_KEY"),
 		SecretKey:    os.Getenv("S3_SECRET_KEY"),
 		Prefix:       strings.Trim(getenvDefault("S3_PREFIX", ""), "/"),
-		AuthUser:     os.Getenv("AUTH_USERNAME"),
-		AuthPassword: os.Getenv("AUTH_PASSWORD"),
+		AuthUser:       os.Getenv("AUTH_USERNAME"),
+		AuthPassword:   os.Getenv("AUTH_PASSWORD"),
+		APIKeyEndpoint: os.Getenv("AUTH_API_KEY_ENDPOINT"),
+		APIKeyToken:    os.Getenv("AUTH_API_KEY_TOKEN"),
 		ChecksumScanInterval: os.Getenv("CHECKSUM_SCAN_INTERVAL"),
 		ChecksumScanPrefix:   strings.Trim(getenvDefault("CHECKSUM_SCAN_PREFIX", ""), "/"),
 	}

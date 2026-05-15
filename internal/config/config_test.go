@@ -54,3 +54,61 @@ func TestLoadWithOverrides(t *testing.T) {
 	// cleanup env overrides
 	os.Unsetenv("S3_USE_PATH_STYLE")
 }
+
+func TestLoadMissingBucket(t *testing.T) {
+	t.Setenv("S3_BUCKET", "")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for missing bucket")
+	}
+}
+
+func TestLoadInvalidPathStyle(t *testing.T) {
+	t.Setenv("S3_BUCKET", "b")
+	t.Setenv("S3_USE_PATH_STYLE", "notabool")
+	defer t.Setenv("S3_USE_PATH_STYLE", "")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for invalid path style")
+	}
+}
+
+func TestLoadAPIKeyEndpoint(t *testing.T) {
+	t.Setenv("S3_BUCKET", "b")
+	t.Setenv("AUTH_API_KEY_ENDPOINT", "https://auth.example.com")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIKeyEndpoint != "https://auth.example.com" {
+		t.Fatalf("expected APIKeyEndpoint, got %q", cfg.APIKeyEndpoint)
+	}
+}
+
+func TestLoadChecksumScanConfig(t *testing.T) {
+	t.Setenv("S3_BUCKET", "b")
+	t.Setenv("CHECKSUM_SCAN_INTERVAL", "15m")
+	t.Setenv("CHECKSUM_SCAN_PREFIX", "/snapshots/")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ChecksumScanInterval != "15m" {
+		t.Fatalf("expected 15m, got %q", cfg.ChecksumScanInterval)
+	}
+	if cfg.ChecksumScanPrefix != "snapshots" {
+		t.Fatalf("expected trimmed prefix, got %q", cfg.ChecksumScanPrefix)
+	}
+}
+
+func TestLoadPrefixTrimmed(t *testing.T) {
+	t.Setenv("S3_BUCKET", "b")
+	t.Setenv("S3_PREFIX", "/my/prefix/")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Prefix != "my/prefix" {
+		t.Fatalf("expected trimmed prefix, got %q", cfg.Prefix)
+	}
+}
