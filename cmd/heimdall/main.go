@@ -23,6 +23,9 @@ import (
 // @description Maven-compatible HTTP server backed by S3-compatible storage.
 // @BasePath /
 // @securityDefinitions.basic BasicAuth
+// @securityDefinitions.apikey ApiKeyAuth
+// @in header
+// @name X-API-Key
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
@@ -54,7 +57,7 @@ func main() {
 	docs.SwaggerInfo.Title = "Heimdall API"
 	docs.SwaggerInfo.Version = "1.0"
 
-	srv := server.New(store, logger, appMetrics, cfg.AuthUser, cfg.AuthPassword)
+	srv := server.New(store, logger, appMetrics, cfg.AuthUser, cfg.AuthPassword, cfg.APIKeyEndpoint, cfg.APIKeyToken)
 
 	httpServer := &http.Server{
 		Addr:    cfg.Addr,

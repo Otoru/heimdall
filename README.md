@@ -7,7 +7,7 @@ Lightweight Maven-compatible HTTP server in Go. Serves artifacts from an S3-comp
 | Area | Details |
 | --- | --- |
 | Storage | S3-compatible, optional prefix, path-style toggle |
-| Auth | Optional Basic Auth for all routes except `/healthz` |
+| Auth | Optional Basic Auth or `X-API-Key` header (OR logic); all routes except `/healthz` |
 | Metrics | `/metrics` on a dedicated listener |
 | Logging | JSON via zap |
 | Checksums | Auto-generate SHA1/MD5 on upload and background repair |
@@ -27,6 +27,8 @@ Lightweight Maven-compatible HTTP server in Go. Serves artifacts from an S3-comp
 | `METRICS_ADDR` | `:9090` | no | Metrics listener (`/metrics`). |
 | `AUTH_USERNAME` | — | no | Enables Basic Auth when paired with password. |
 | `AUTH_PASSWORD` | — | no | Password for Basic Auth. |
+| `AUTH_API_KEY_ENDPOINT` | — | no | Base URL for API key validation. Heimdall calls `GET <url>/licenses/valid?id=<key>`; 2xx = valid. |
+| `AUTH_API_KEY_TOKEN` | — | no | Token sent as `Authorization` header when calling the validation endpoint. Use `envSecrets` in Helm. |
 | `CHECKSUM_SCAN_INTERVAL` | — | no | Background checksum repair interval (e.g. `10m`); empty disables. |
 | `CHECKSUM_SCAN_PREFIX` | — | no | Limit checksum repair scan to a prefix. |
 
@@ -123,7 +125,7 @@ docker compose up --build
 </repository>
 ```
 
-For Basic Auth, add a `<server>` entry in `settings.xml` with `id` matching the repository.
+For Basic Auth, add a `<server>` entry in `settings.xml` with `id` matching the repository. Alternatively, pass `X-API-Key: <token>` on every request if the API key auth is configured.
 
 ## Notes
 

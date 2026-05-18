@@ -6,6 +6,10 @@ info:
   version: "1.0"
 paths: {}
 securityDefinitions:
+  ApiKeyAuth:
+    in: header
+    name: X-API-Key
+    type: apiKey
   BasicAuth:
     type: basic
 swagger: "2.0"

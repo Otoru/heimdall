@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"strconv"
@@ -23,6 +24,15 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	headerContentType   = "Content-Type"
+	headerContentLength = "Content-Length"
+	headerLastModified  = "Last-Modified"
+	errMethodNotAllowed = "method not allowed"
+	errListProxies      = "list proxies"
+	packagesPrefix      = "packages/"
+)
+
 type Storage interface {
 	Get(ctx context.Context, key string) (*s3.GetObjectOutput, error)
 	Head(ctx context.Context, key string) (*s3.HeadObjectOutput, error)
@@ -34,22 +44,28 @@ type Storage interface {
 }
 
 type Server struct {
-	store   Storage
-	proxy   *ProxyManager
-	logger  *zap.Logger
-	metrics *metrics.Registry
-	user    string
-	pass    string
+	store          Storage
+	proxy          *ProxyManager
+	logger         *zap.Logger
+	metrics        *metrics.Registry
+	user           string
+	pass           string
+	apiKeyEndpoint string
+	apiKeyToken    string
+	httpClient     *http.Client
 }
 
-func New(store Storage, logger *zap.Logger, m *metrics.Registry, user, pass string) *Server {
+func New(store Storage, logger *zap.Logger, m *metrics.Registry, user, pass, apiKeyEndpoint, apiKeyToken string) *Server {
 	return &Server{
-		store:   store,
-		proxy:   NewProxyManager(store, logger),
-		logger:  logger,
-		metrics: m,
-		user:    user,
-		pass:    pass,
+		store:          store,
+		proxy:          NewProxyManager(store, logger),
+		logger:         logger,
+		metrics:        m,
+		user:           user,
+		pass:           pass,
+		apiKeyEndpoint: apiKeyEndpoint,
+		apiKeyToken:    apiKeyToken,
+		httpClient:     &http.Client{Timeout: 5 * time.Second},
 	}
 }
 
@@ -81,19 +97,58 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	if s.user == "" && s.pass == "" {
+	if s.user == "" && s.pass == "" && s.apiKeyEndpoint == "" {
 		return next
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		if !ok || u != s.user || p != s.pass {
-			w.Header().Set("WWW-Authenticate", `Basic realm="heimdall"`)
+		if apiKey := r.Header.Get("X-API-Key"); apiKey != "" {
+			if s.apiKeyEndpoint != "" && s.validateAPIKey(r.Context(), apiKey) {
+				next(w, r)
+				return
+			}
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next(w, r)
+
+		if s.user != "" || s.pass != "" {
+			u, p, ok := r.BasicAuth()
+			if ok && u == s.user && p == s.pass {
+				next(w, r)
+				return
+			}
+		}
+
+		w.Header().Set("WWW-Authenticate", `Basic realm="heimdall"`)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}
+}
+
+func (s *Server) validateAPIKey(ctx context.Context, key string) bool {
+	base, err := url.Parse(s.apiKeyEndpoint)
+	if err != nil {
+		return false
+	}
+	base.Path = path.Join(base.Path, "licenses", "valid")
+	q := url.Values{}
+	q.Set("id", key)
+	base.RawQuery = q.Encode()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+	if err != nil {
+		return false
+	}
+	if s.apiKeyToken != "" {
+		req.Header.Set("Authorization", s.apiKeyToken)
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode >= 200 && resp.StatusCode < 300
 }
 
 // @Summary Health check
@@ -113,15 +168,11 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {array} storage.Entry
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /catalog [get]
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	prefix := r.URL.Query().Get("path")
-	limit := int32(100)
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 && parsed <= 1000 {
-			limit = int32(parsed)
-		}
-	}
+	limit := parseCatalogLimit(r.URL.Query().Get("limit"))
 
 	if strings.HasPrefix(strings.TrimPrefix(prefix, "/"), "packages") {
 		keys, err := s.listPackages(r.Context(), prefix, limit)
@@ -129,11 +180,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, "list packages", err)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		if err := json.NewEncoder(w).Encode(keys); err != nil {
-			s.logger.Warn("encode catalog", zap.Error(err))
-		}
+		s.writeJSON(w, keys)
 		return
 	}
 
@@ -143,62 +190,81 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if prEntries, handled, err := s.maybeListProxy(r.Context(), prefix, limit); err == nil && handled {
-		// merge proxy entries with any cached local items for this prefix
-		merged := append([]storage.Entry{}, prEntries...)
-		existing := map[string]struct{}{}
-		for _, e := range merged {
-			existing[e.Name] = struct{}{}
-		}
-		for _, e := range keys {
-			if strings.HasPrefix(e.Path, proxyConfigPrefix) {
-				continue
-			}
-			if _, ok := existing[e.Name]; ok {
-				continue
-			}
-			merged = append(merged, e)
-		}
-		keys = merged
-	} else if err != nil {
-		s.logger.Warn("list proxy path", zap.Error(err))
-	}
-
-	var filtered []storage.Entry
-	for _, k := range keys {
-		if strings.HasPrefix(k.Path, proxyConfigPrefix) {
-			continue
-		}
-		filtered = append(filtered, k)
-	}
-	keys = filtered
-	if keys == nil {
-		keys = []storage.Entry{}
-	}
+	keys = s.mergeProxyCatalog(r.Context(), prefix, limit, keys)
+	keys = filterProxyConfig(keys)
 
 	if prefix == "" || prefix == "/" {
-		keys = append(keys, storage.Entry{
-			Name: "packages/",
-			Path: "packages/",
-			Type: "group",
-		})
-		if proxies, err := s.proxy.List(r.Context()); err == nil {
-			for _, pr := range proxies {
-				keys = append(keys, storage.Entry{
-					Name: pr.Name + "/",
-					Path: pr.Name + "/",
-					Type: "proxy",
-				})
-			}
-		} else {
-			s.logger.Warn("list proxies for catalog", zap.Error(err))
-		}
+		keys = s.appendRootEntries(r.Context(), keys)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	s.writeJSON(w, keys)
+}
+
+func parseCatalogLimit(v string) int32 {
+	if v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 && parsed <= 1000 {
+			return int32(parsed)
+		}
+	}
+	return 100
+}
+
+func filterProxyConfig(entries []storage.Entry) []storage.Entry {
+	var out []storage.Entry
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Path, proxyConfigPrefix) {
+			out = append(out, e)
+		}
+	}
+	if out == nil {
+		return []storage.Entry{}
+	}
+	return out
+}
+
+func (s *Server) mergeProxyCatalog(ctx context.Context, prefix string, limit int32, local []storage.Entry) []storage.Entry {
+	prEntries, handled, err := s.maybeListProxy(ctx, prefix, limit)
+	if err != nil {
+		s.logger.Warn("list proxy path", zap.Error(err))
+		return local
+	}
+	if !handled {
+		return local
+	}
+	merged := append([]storage.Entry{}, prEntries...)
+	seen := make(map[string]struct{}, len(merged))
+	for _, e := range merged {
+		seen[e.Name] = struct{}{}
+	}
+	for _, e := range local {
+		if strings.HasPrefix(e.Path, proxyConfigPrefix) {
+			continue
+		}
+		if _, ok := seen[e.Name]; !ok {
+			merged = append(merged, e)
+		}
+	}
+	return merged
+}
+
+func (s *Server) appendRootEntries(ctx context.Context, keys []storage.Entry) []storage.Entry {
+	keys = append(keys, storage.Entry{Name: packagesPrefix, Path: packagesPrefix, Type: "group"})
+	proxies, err := s.proxy.List(ctx)
+	if err != nil {
+		s.logger.Warn("list proxies for catalog", zap.Error(err))
+		return keys
+	}
+	for _, pr := range proxies {
+		keys = append(keys, storage.Entry{Name: pr.Name + "/", Path: pr.Name + "/", Type: "proxy"})
+	}
+	return keys
+}
+
+func (s *Server) writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set(headerContentType, "application/json")
 	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(keys); err != nil {
-		s.logger.Warn("encode catalog", zap.Error(err))
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		s.logger.Warn("encode response", zap.Error(err))
 	}
 }
 
@@ -210,7 +276,7 @@ func (s *Server) routeProxies(w http.ResponseWriter, r *http.Request) {
 		s.handleCreateProxy(w, r)
 	default:
 		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 	}
 }
 
@@ -229,7 +295,7 @@ func (s *Server) routeProxyByName(w http.ResponseWriter, r *http.Request) {
 		s.handleDeleteProxy(w, r, name)
 	default:
 		w.Header().Set("Allow", "PUT, DELETE")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 	}
 }
 
@@ -238,17 +304,15 @@ func (s *Server) routeProxyByName(w http.ResponseWriter, r *http.Request) {
 // @Produce json
 // @Success 200 {array} server.Proxy
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /proxies [get]
 func (s *Server) handleListProxies(w http.ResponseWriter, r *http.Request) {
 	proxies, err := s.proxy.List(r.Context())
 	if err != nil {
-		s.writeError(w, "list proxies", err)
+		s.writeError(w, errListProxies, err)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(proxies); err != nil {
-		s.logger.Warn("encode proxies", zap.Error(err))
-	}
+	s.writeJSON(w, proxies)
 }
 
 // @Summary Create proxy repository
@@ -259,6 +323,7 @@ func (s *Server) handleListProxies(w http.ResponseWriter, r *http.Request) {
 // @Success 201 {string} string "Created"
 // @Failure 400 {string} string
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /proxies [post]
 func (s *Server) handleCreateProxy(w http.ResponseWriter, r *http.Request) {
 	var pr Proxy
@@ -282,6 +347,7 @@ func (s *Server) handleCreateProxy(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {string} string "Updated"
 // @Failure 400 {string} string
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /proxies/{name} [put]
 func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request, name string) {
 	var pr Proxy
@@ -303,6 +369,7 @@ func (s *Server) handleUpdateProxy(w http.ResponseWriter, r *http.Request, name 
 // @Success 204 {string} string "Deleted"
 // @Failure 400 {string} string
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /proxies/{name} [delete]
 func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, name string) {
 	if err := s.proxy.Delete(r.Context(), name); err != nil {
@@ -317,6 +384,7 @@ func (s *Server) handleDeleteProxy(w http.ResponseWriter, r *http.Request, name 
 // @Produce application/octet-stream
 // @Failure 404 {string} string "Not Found"
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /packages/{artifactPath} [get]
 // @Router /packages/{artifactPath} [head]
 func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
@@ -332,7 +400,7 @@ func (s *Server) handlePackages(w http.ResponseWriter, r *http.Request) {
 		s.handlePackageHead(w, r, key)
 	default:
 		w.Header().Set("Allow", "GET, HEAD")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 	}
 }
 
@@ -353,78 +421,95 @@ func (s *Server) maybeListProxy(ctx context.Context, prefix string, limit int32)
 	return entries, true, nil
 }
 
-func (s *Server) listPackages(ctx context.Context, prefix string, limit int32) ([]storage.Entry, error) {
+type packageAccumulator struct {
+	seen      map[string]struct{}
+	keys      []storage.Entry
+	remaining int32
+}
+
+func newPackageAccumulator(limit int32) *packageAccumulator {
+	if limit <= 0 {
+		limit = 100
+	}
+	return &packageAccumulator{seen: make(map[string]struct{}), remaining: limit}
+}
+
+func (a *packageAccumulator) add(e storage.Entry) bool {
+	e, ok := normalizePackageEntry(e)
+	_, dup := a.seen[e.Name]
+	if !ok || dup {
+		return false
+	}
+	a.seen[e.Name] = struct{}{}
+	a.keys = append(a.keys, e)
+	a.remaining--
+	return a.remaining == 0
+}
+
+func normalizePackageEntry(e storage.Entry) (storage.Entry, bool) {
+	trimmed := strings.TrimPrefix(e.Path, packagesPrefix)
+	if strings.HasPrefix(trimmed, proxyConfigPrefix) || strings.HasPrefix(e.Name, proxyConfigPrefix) {
+		return e, false
+	}
+	if e.Type == "dir" || e.Type == "proxy" || e.Type == "group" {
+		if !strings.HasSuffix(e.Name, "/") {
+			e.Name += "/"
+		}
+		if !strings.HasSuffix(e.Path, "/") {
+			e.Path += "/"
+		}
+	}
+	return e, true
+}
+
+func (s *Server) logProxyListError(proxyName string, err error) {
+	var se ProxyStatusError
+	if errors.As(err, &se) && (se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden) {
+		return
+	}
+	s.logger.Warn("list packages proxy", zap.String("proxy", proxyName), zap.Error(err))
+}
+
+func trimPackagePrefix(prefix string) string {
 	clean := strings.TrimPrefix(strings.TrimSpace(prefix), "/")
 	clean = strings.TrimPrefix(clean, "packages")
-	clean = strings.TrimPrefix(clean, "/")
+	return strings.TrimPrefix(clean, "/")
+}
 
-	var keys []storage.Entry
-	remaining := limit
-	if remaining <= 0 {
-		remaining = 100
-	}
+func (s *Server) listPackages(ctx context.Context, prefix string, limit int32) ([]storage.Entry, error) {
+	clean := trimPackagePrefix(prefix)
+	acc := newPackageAccumulator(limit)
 
-	seen := map[string]struct{}{}
-	add := func(e storage.Entry) {
-		trimmed := strings.TrimPrefix(e.Path, "packages/")
-		if strings.HasPrefix(trimmed, proxyConfigPrefix) || strings.HasPrefix(e.Name, proxyConfigPrefix) {
-			return
-		}
-		if e.Type == "dir" || e.Type == "proxy" || e.Type == "group" {
-			if !strings.HasSuffix(e.Name, "/") {
-				e.Name += "/"
-			}
-			if !strings.HasSuffix(e.Path, "/") {
-				e.Path += "/"
-			}
-		}
-		if _, ok := seen[e.Name]; ok {
-			return
-		}
-		seen[e.Name] = struct{}{}
-		keys = append(keys, e)
-		remaining--
-	}
-
-	// local
-	local, err := s.store.List(ctx, clean, remaining)
-	if err == nil {
-		for _, e := range local {
-			e.Path = path.Join("packages", e.Path)
-			add(e)
-			if remaining == 0 {
-				return keys, nil
-			}
-		}
-	} else {
+	local, err := s.store.List(ctx, clean, acc.remaining)
+	if err != nil {
 		s.logger.Warn("list packages local", zap.Error(err))
 	}
+	for _, e := range local {
+		e.Path = path.Join("packages", e.Path)
+		if acc.add(e) {
+			return acc.keys, nil
+		}
+	}
 
-	// proxies
 	proxies, err := s.proxy.List(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, pr := range proxies {
-		prEntries, _, err := s.proxy.ListPath(ctx, path.Join(pr.Name, clean), remaining)
+		prEntries, _, err := s.proxy.ListPath(ctx, path.Join(pr.Name, clean), acc.remaining)
 		if err != nil {
-			var se ProxyStatusError
-			if errors.As(err, &se) && (se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden) {
-				continue
-			}
-			s.logger.Warn("list packages proxy", zap.String("proxy", pr.Name), zap.Error(err))
+			s.logProxyListError(pr.Name, err)
 			continue
 		}
 		for _, e := range prEntries {
 			e.Path = path.Join("packages", pr.Name, e.Name)
-			add(e)
-			if remaining == 0 {
-				return keys, nil
+			if acc.add(e) {
+				return acc.keys, nil
 			}
 		}
 	}
 
-	return keys, nil
+	return acc.keys, nil
 }
 
 func (s *Server) handlePackageGet(w http.ResponseWriter, r *http.Request, key string) {
@@ -439,7 +524,7 @@ func (s *Server) handlePackageGet(w http.ResponseWriter, r *http.Request, key st
 	// check cached proxies
 	proxies, err := s.proxy.List(r.Context())
 	if err != nil {
-		s.writeError(w, "list proxies", err)
+		s.writeError(w, errListProxies, err)
 		return
 	}
 	for _, pr := range proxies {
@@ -486,7 +571,7 @@ func (s *Server) handlePackageHead(w http.ResponseWriter, r *http.Request, key s
 
 	proxies, err := s.proxy.List(r.Context())
 	if err != nil {
-		s.writeError(w, "list proxies", err)
+		s.writeError(w, errListProxies, err)
 		return
 	}
 	for _, pr := range proxies {
@@ -508,15 +593,7 @@ func (s *Server) handlePackageHead(w http.ResponseWriter, r *http.Request, key s
 	}
 	if found {
 		defer presp.Body.Close()
-		if cl := presp.Header.Get("Content-Length"); cl != "" {
-			w.Header().Set("Content-Length", cl)
-		}
-		if ct := presp.Header.Get("Content-Type"); ct != "" {
-			w.Header().Set("Content-Type", ct)
-		}
-		if lm := presp.Header.Get("Last-Modified"); lm != "" {
-			w.Header().Set("Last-Modified", lm)
-		}
+		writeProxyHeaders(w, presp)
 		w.WriteHeader(http.StatusOK)
 		return
 	}
@@ -574,34 +651,61 @@ func (s *Server) tryLocalHead(ctx context.Context, key string) (*s3.HeadObjectOu
 	return nil, false
 }
 
+func writeProxyHeaders(w http.ResponseWriter, resp *http.Response) {
+	if cl := resp.Header.Get(headerContentLength); cl != "" {
+		w.Header().Set(headerContentLength, cl)
+	}
+	if ct := resp.Header.Get(headerContentType); ct != "" {
+		w.Header().Set(headerContentType, ct)
+	}
+	if lm := resp.Header.Get(headerLastModified); lm != "" {
+		w.Header().Set(headerLastModified, lm)
+	}
+}
+
+func (s *Server) fetchViaProxy(ctx context.Context, key string) (*s3.GetObjectOutput, error) {
+	found, err := s.proxy.FetchAndCache(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, nil
+	}
+	resp, err := s.store.Get(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return resp, nil
+}
+
 func (s *Server) writeHeadResponse(w http.ResponseWriter, resp *s3.HeadObjectOutput) {
 	if resp.ContentLength != nil && *resp.ContentLength >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(*resp.ContentLength, 10))
+		w.Header().Set(headerContentLength, strconv.FormatInt(*resp.ContentLength, 10))
 	}
 	if resp.ContentType != nil {
-		w.Header().Set("Content-Type", *resp.ContentType)
+		w.Header().Set(headerContentType, *resp.ContentType)
 	}
 	if resp.ETag != nil {
 		w.Header().Set("ETag", strings.Trim(*resp.ETag, "\""))
 	}
 	if resp.LastModified != nil {
-		w.Header().Set("Last-Modified", resp.LastModified.UTC().Format(http.TimeFormat))
+		w.Header().Set(headerLastModified, resp.LastModified.UTC().Format(http.TimeFormat))
 	}
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) writeObjectResponse(w http.ResponseWriter, resp *s3.GetObjectOutput) {
 	if resp.ContentLength != nil && *resp.ContentLength >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(*resp.ContentLength, 10))
+		w.Header().Set(headerContentLength, strconv.FormatInt(*resp.ContentLength, 10))
 	}
 	if resp.ContentType != nil {
-		w.Header().Set("Content-Type", *resp.ContentType)
+		w.Header().Set(headerContentType, *resp.ContentType)
 	}
 	if resp.ETag != nil {
 		w.Header().Set("ETag", strings.Trim(*resp.ETag, "\""))
 	}
 	if resp.LastModified != nil {
-		w.Header().Set("Last-Modified", resp.LastModified.UTC().Format(http.TimeFormat))
+		w.Header().Set(headerLastModified, resp.LastModified.UTC().Format(http.TimeFormat))
 	}
 	w.WriteHeader(http.StatusOK)
 	if _, err := io.Copy(w, resp.Body); err != nil {
@@ -625,7 +729,7 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request) {
 		s.handlePut(w, r, key)
 	default:
 		w.Header().Set("Allow", "GET, HEAD, PUT")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, errMethodNotAllowed, http.StatusMethodNotAllowed)
 	}
 }
 
@@ -636,49 +740,27 @@ func (s *Server) handleObject(w http.ResponseWriter, r *http.Request) {
 // @Success 200 {file} file
 // @Failure 404 {string} string "Not Found"
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /{artifactPath} [get]
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 	resp, err := s.store.Get(r.Context(), key)
-	if err != nil {
-		if storage.IsNotFound(err) {
-			if found, perr := s.proxy.FetchAndCache(r.Context(), key); perr != nil {
-				s.writeError(w, "proxy fetch", perr)
-				return
-			} else if found {
-				resp, err = s.store.Get(r.Context(), key)
-				if err != nil {
-					s.writeError(w, "fetch cached proxy object", err)
-					return
-				}
-				defer resp.Body.Close()
-			} else {
-				http.NotFound(w, r)
-				return
-			}
-		} else {
-			s.writeError(w, "fetch object", err)
+	if err != nil && !storage.IsNotFound(err) {
+		s.writeError(w, "fetch object", err)
+		return
+	}
+	if storage.IsNotFound(err) {
+		resp, err = s.fetchViaProxy(r.Context(), key)
+		if err != nil {
+			s.writeError(w, "proxy fetch", err)
+			return
+		}
+		if resp == nil {
+			http.NotFound(w, r)
 			return
 		}
 	}
 	defer resp.Body.Close()
-
-	if resp.ContentLength != nil && *resp.ContentLength >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(*resp.ContentLength, 10))
-	}
-	if resp.ContentType != nil {
-		w.Header().Set("Content-Type", *resp.ContentType)
-	}
-	if resp.ETag != nil {
-		w.Header().Set("ETag", strings.Trim(*resp.ETag, "\""))
-	}
-	if resp.LastModified != nil {
-		w.Header().Set("Last-Modified", resp.LastModified.UTC().Format(http.TimeFormat))
-	}
-
-	w.WriteHeader(http.StatusOK)
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		s.logger.Warn("stream object", zap.String("key", key), zap.Error(err))
-	}
+	s.writeObjectResponse(w, resp)
 }
 
 // @Summary Artifact metadata
@@ -687,49 +769,30 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, key string) {
 // @Success 200 {string} string "OK"
 // @Failure 404 {string} string "Not Found"
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /{artifactPath} [head]
 func (s *Server) handleHead(w http.ResponseWriter, r *http.Request, key string) {
 	resp, err := s.store.Head(r.Context(), key)
-	if err != nil {
-		if storage.IsNotFound(err) {
-			if presp, found, perr := s.proxy.Head(r.Context(), key); perr != nil {
-				s.writeError(w, "proxy head", perr)
-				return
-			} else if found {
-				defer presp.Body.Close()
-				if cl := presp.Header.Get("Content-Length"); cl != "" {
-					w.Header().Set("Content-Length", cl)
-				}
-				if ct := presp.Header.Get("Content-Type"); ct != "" {
-					w.Header().Set("Content-Type", ct)
-				}
-				if lm := presp.Header.Get("Last-Modified"); lm != "" {
-					w.Header().Set("Last-Modified", lm)
-				}
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			http.NotFound(w, r)
-			return
-		}
+	if err != nil && !storage.IsNotFound(err) {
 		s.writeError(w, "head object", err)
 		return
 	}
-
-	if resp.ContentLength != nil && *resp.ContentLength >= 0 {
-		w.Header().Set("Content-Length", strconv.FormatInt(*resp.ContentLength, 10))
+	if storage.IsNotFound(err) {
+		presp, found, perr := s.proxy.Head(r.Context(), key)
+		if perr != nil {
+			s.writeError(w, "proxy head", perr)
+			return
+		}
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		defer presp.Body.Close()
+		writeProxyHeaders(w, presp)
+		w.WriteHeader(http.StatusOK)
+		return
 	}
-	if resp.ContentType != nil {
-		w.Header().Set("Content-Type", *resp.ContentType)
-	}
-	if resp.ETag != nil {
-		w.Header().Set("ETag", strings.Trim(*resp.ETag, "\""))
-	}
-	if resp.LastModified != nil {
-		w.Header().Set("Last-Modified", resp.LastModified.UTC().Format(http.TimeFormat))
-	}
-
-	w.WriteHeader(http.StatusOK)
+	s.writeHeadResponse(w, resp)
 }
 
 // @Summary Upload artifact
@@ -739,6 +802,7 @@ func (s *Server) handleHead(w http.ResponseWriter, r *http.Request, key string) 
 // @Produce plain
 // @Success 201 {string} string "Created"
 // @Security BasicAuth
+// @Security ApiKeyAuth
 // @Router /{artifactPath} [put]
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 	defer r.Body.Close()
@@ -748,7 +812,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, key string) {
 		return
 	}
 
-	contentType := r.Header.Get("Content-Type")
+	contentType := r.Header.Get(headerContentType)
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}

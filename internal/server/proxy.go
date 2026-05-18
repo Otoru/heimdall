@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -213,8 +214,6 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 		return false, nil
 	}
 
-	isChecksum := strings.HasSuffix(strings.ToLower(artifactPath), ".sha1") || strings.HasSuffix(strings.ToLower(artifactPath), ".md5")
-
 	proxy, found, err := p.findByName(ctx, name)
 	if err != nil {
 		return false, err
@@ -223,8 +222,8 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 		return false, nil
 	}
 
-	url := strings.TrimSuffix(proxy.URL, "/") + "/" + artifactPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	targetURL := strings.TrimSuffix(proxy.URL, "/") + "/" + artifactPath
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
 	if err != nil {
 		return false, err
 	}
@@ -234,16 +233,19 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
 		return false, nil
-	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return false, ProxyStatusError{Code: resp.StatusCode}
-	}
-	if resp.StatusCode >= 300 {
+	case resp.StatusCode >= 300:
 		return false, ProxyStatusError{Code: resp.StatusCode}
 	}
 
+	isChecksum := strings.HasSuffix(strings.ToLower(artifactPath), ".sha1") ||
+		strings.HasSuffix(strings.ToLower(artifactPath), ".md5")
+	return p.cacheResponse(ctx, key, resp, isChecksum)
+}
+
+func (p *ProxyManager) cacheResponse(ctx context.Context, key string, resp *http.Response, isChecksum bool) (bool, error) {
 	tmp, err := os.CreateTemp("", "heimdall-proxy-*")
 	if err != nil {
 		return false, err
@@ -265,39 +267,104 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return false, err
 	}
-	contentType := resp.Header.Get("Content-Type")
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
 
-	if err := p.store.Put(ctx, key, tmp, contentType, info.Size()); err != nil {
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "application/octet-stream"
+	}
+	if err := p.store.Put(ctx, key, tmp, ct, info.Size()); err != nil {
 		return false, err
 	}
 
 	if !isChecksum {
-		sha1sum := hex.EncodeToString(sha1h.Sum(nil))
-		md5sum := hex.EncodeToString(md5h.Sum(nil))
-		if err := p.store.Put(ctx, key+".sha1", strings.NewReader(sha1sum), "text/plain", int64(len(sha1sum))); err != nil {
-			return false, err
-		}
-		if err := p.store.Put(ctx, key+".md5", strings.NewReader(md5sum), "text/plain", int64(len(md5sum))); err != nil {
-			return false, err
-		}
+		return true, p.storeChecksums(ctx, key, sha1h, md5h)
 	}
-
 	return true, nil
 }
 
-func (p *ProxyManager) ListPath(ctx context.Context, key string, limit int32) ([]storage.Entry, bool, error) {
+func (p *ProxyManager) storeChecksums(ctx context.Context, key string, sha1h, md5h hash.Hash) error {
+	sha1sum := hex.EncodeToString(sha1h.Sum(nil))
+	md5sum := hex.EncodeToString(md5h.Sum(nil))
+	if err := p.store.Put(ctx, key+".sha1", strings.NewReader(sha1sum), "text/plain", int64(len(sha1sum))); err != nil {
+		return err
+	}
+	return p.store.Put(ctx, key+".md5", strings.NewReader(md5sum), "text/plain", int64(len(md5sum)))
+}
+
+func splitListKey(key string) (name, artifactPath string) {
 	trimmed := strings.TrimPrefix(key, "/")
 	parts := strings.SplitN(trimmed, "/", 2)
-	name := parts[0]
-	artifactPath := ""
-	if name == "" {
-		return nil, false, nil
-	}
+	name = parts[0]
 	if len(parts) == 2 {
 		artifactPath = parts[1]
+	}
+	return
+}
+
+func hrefToEntry(href string) (storage.Entry, bool) {
+	if href == "../" || href == "" {
+		return storage.Entry{}, false
+	}
+	u, err := url.Parse(href)
+	if err != nil {
+		return storage.Entry{}, false
+	}
+	raw := strings.TrimSpace(u.Path)
+	if raw == "" {
+		return storage.Entry{}, false
+	}
+	norm := strings.TrimPrefix(raw, "/")
+	isDir := strings.HasSuffix(norm, "/")
+	norm = strings.TrimSuffix(norm, "/")
+	if norm == "" || strings.Contains(norm, "/") {
+		return storage.Entry{}, false
+	}
+	entryName := norm
+	if isDir {
+		entryName += "/"
+	}
+	etype := "file"
+	if isDir {
+		etype = "dir"
+	}
+	return storage.Entry{Name: entryName, Path: path.Join(entryName, ""), Type: etype}, true
+}
+
+func nodeToEntry(n *html.Node) (storage.Entry, bool) {
+	if n.Type != html.ElementNode || n.Data != "a" {
+		return storage.Entry{}, false
+	}
+	for _, attr := range n.Attr {
+		if attr.Key == "href" {
+			return hrefToEntry(attr.Val)
+		}
+	}
+	return storage.Entry{}, false
+}
+
+func parseHTMLEntries(root *html.Node, limit int32) []storage.Entry {
+	var entries []storage.Entry
+	stack := []*html.Node{root}
+	for len(stack) > 0 {
+		n := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if limit > 0 && int32(len(entries)) >= limit {
+			break
+		}
+		if e, ok := nodeToEntry(n); ok {
+			entries = append(entries, e)
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			stack = append(stack, c)
+		}
+	}
+	return entries
+}
+
+func (p *ProxyManager) ListPath(ctx context.Context, key string, limit int32) ([]storage.Entry, bool, error) {
+	name, artifactPath := splitListKey(key)
+	if name == "" {
+		return nil, false, nil
 	}
 
 	proxy, found, err := p.findByName(ctx, name)
@@ -323,13 +390,10 @@ func (p *ProxyManager) ListPath(ctx context.Context, key string, limit int32) ([
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusNotFound {
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
 		return []storage.Entry{}, true, nil
-	}
-	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
-		return nil, true, ProxyStatusError{Code: resp.StatusCode}
-	}
-	if resp.StatusCode >= 300 {
+	case resp.StatusCode >= 300:
 		return nil, true, ProxyStatusError{Code: resp.StatusCode}
 	}
 
@@ -338,64 +402,7 @@ func (p *ProxyManager) ListPath(ctx context.Context, key string, limit int32) ([
 		return nil, true, err
 	}
 
-	var entries []storage.Entry
-	var walker func(*html.Node)
-	walker = func(n *html.Node) {
-		if n.Type == html.ElementNode && n.Data == "a" {
-			for _, attr := range n.Attr {
-				if attr.Key != "href" {
-					continue
-				}
-				href := attr.Val
-				if href == "../" || href == "" {
-					continue
-				}
-				u, err := url.Parse(href)
-				if err != nil {
-					continue
-				}
-				raw := strings.TrimSpace(u.Path)
-				if raw == "" {
-					continue
-				}
-				norm := strings.TrimPrefix(raw, "/")
-				isDir := strings.HasSuffix(norm, "/")
-				norm = strings.TrimSuffix(norm, "/")
-				if norm == "" {
-					continue
-				}
-				if strings.Contains(norm, "/") {
-					// skip nested segments; we only want immediate children
-					continue
-				}
-				name := norm
-				if isDir {
-					name += "/"
-				}
-				etype := "file"
-				if isDir {
-					etype = "dir"
-				}
-				entries = append(entries, storage.Entry{
-					Name: name,
-					Path: path.Join(name, ""),
-					Type: etype,
-				})
-				if limit > 0 && int32(len(entries)) >= limit {
-					return
-				}
-			}
-		}
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if limit > 0 && int32(len(entries)) >= limit {
-				return
-			}
-			walker(c)
-		}
-	}
-	walker(doc)
-
-	return entries, true, nil
+	return parseHTMLEntries(doc, limit), true, nil
 }
 
 func (p *ProxyManager) Head(ctx context.Context, key string) (*http.Response, bool, error) {

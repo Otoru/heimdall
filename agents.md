@@ -3,7 +3,7 @@
 This repo is a Maven-compatible HTTP server backed by S3. Key capabilities:
 
 - S3 storage with optional prefix/path-style; computes SHA1/MD5 on upload and background repair.
-- Optional Basic Auth (all routes except `/healthz`).
+- Auth: Optional Basic Auth **or** `X-API-Key` header (OR logic — either method passes). API key validated via external HTTP endpoint (`AUTH_API_KEY_ENDPOINT`); token sent as `Authorization` header (`AUTH_API_KEY_TOKEN`). Auth disabled when all three env vars are unset.
 - Prometheus metrics on a dedicated listener.
 - Maven proxy with S3 cache: on-demand fetch from upstream (e.g., Maven Central), catalog browsing via parsed HTML listings, and no chained checksum generation when fetching checksum files.
 - Proxy management API: `GET/POST /proxies` (create), `PUT/DELETE /proxies/{name}` (update/delete). Proxy configs live in S3 under `__proxycfg__/`.
@@ -20,7 +20,9 @@ Packaging and releases:
 Config (envs):
 
 - `S3_BUCKET` (required), `S3_REGION` (default `us-east-1`), `S3_ENDPOINT`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`, `S3_USE_PATH_STYLE`, `S3_PREFIX`.
-- `SERVER_ADDR` (default `:8080`), `METRICS_ADDR` (default `:9090`), `AUTH_USERNAME/PASSWORD`.
+- `SERVER_ADDR` (default `:8080`), `METRICS_ADDR` (default `:9090`), `AUTH_USERNAME`, `AUTH_PASSWORD`.
+- `AUTH_API_KEY_ENDPOINT` — base URL for API key validation (`GET <endpoint>/licenses/valid?id=<key>`).
+- `AUTH_API_KEY_TOKEN` — token sent in the `Authorization` header when calling the API key endpoint. Inject via `envSecrets` in Helm, not plain `env`.
 - `CHECKSUM_SCAN_INTERVAL`, `CHECKSUM_SCAN_PREFIX`.
 
 Testing:
@@ -29,7 +31,7 @@ Testing:
 
 Notes for changes:
 
-- Update swagger after handler annotations: `/Users/vitor/.asdf/installs/golang/1.25.5/bin/swag init -g cmd/heimdall/main.go -o internal/docs`.
+- Update swagger after handler annotations: `swag init -g cmd/heimdall/main.go -o cmd/internal/docs`. Security definitions: `BasicAuth` (basic) and `ApiKeyAuth` (apiKey, header `X-API-Key`).
 - Avoid committing `internal/docs/swagger.json|yaml` (ignored). Only `docs.go` is tracked.
 - Chart HPA is off by default; set `autoscaling.enabled=true` to enable.
 - Checklist per change:
