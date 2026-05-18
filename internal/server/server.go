@@ -131,7 +131,7 @@ func (s *Server) validateAPIKey(ctx context.Context, key string) bool {
 	}
 	base.Path = path.Join(base.Path, "licenses", "valid")
 	q := url.Values{}
-	q.Set("id", key)
+	q.Set("serial_number", key)
 	base.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
@@ -534,7 +534,7 @@ func (s *Server) handlePackageGet(w http.ResponseWriter, r *http.Request, key st
 			s.writeObjectResponse(w, resp)
 			return
 		}
-		if err != nil && !storage.IsNotFound(err) {
+		if !storage.IsNotFound(err) {
 			s.writeError(w, "fetch cached proxy object", err)
 			return
 		}
@@ -580,7 +580,7 @@ func (s *Server) handlePackageHead(w http.ResponseWriter, r *http.Request, key s
 			s.writeHeadResponse(w, resp)
 			return
 		}
-		if err != nil && !storage.IsNotFound(err) {
+		if !storage.IsNotFound(err) {
 			s.writeError(w, "head cached proxy object", err)
 			return
 		}
@@ -606,7 +606,7 @@ func (s *Server) tryLocalGet(ctx context.Context, key string) (*s3.GetObjectOutp
 	if err == nil {
 		return resp, true
 	}
-	if err != nil && !storage.IsNotFound(err) {
+	if !storage.IsNotFound(err) {
 		return nil, false
 	}
 
@@ -631,7 +631,7 @@ func (s *Server) tryLocalHead(ctx context.Context, key string) (*s3.HeadObjectOu
 	if err == nil {
 		return resp, true
 	}
-	if err != nil && !storage.IsNotFound(err) {
+	if !storage.IsNotFound(err) {
 		return nil, false
 	}
 
