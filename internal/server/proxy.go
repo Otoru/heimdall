@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -26,6 +27,18 @@ var proxyNameRe = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 const proxyConfigPrefix = "__proxycfg__/"
 
+// sha1HexRe matches a bare SHA-1 digest. Upstream checksum files are not
+// consistently formatted: some carry a trailing newline, some use the
+// "<digest>  <filename>" form produced by sha1sum.
+var sha1HexRe = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
+// ErrChecksumMismatch is returned when the bytes fetched from upstream do not
+// match the checksum upstream publishes for them. The artifact is discarded
+// rather than cached: a poisoned cache entry is served forever and surfaces as
+// an unrelated failure much later (a missing class at build time, say), while a
+// failed request is simply retried.
+var ErrChecksumMismatch = errors.New("upstream checksum mismatch")
+
 type Proxy struct {
 	Name string `json:"name"`
 	URL  string `json:"url"`
@@ -39,26 +52,95 @@ func (e ProxyStatusError) Error() string {
 	return fmt.Sprintf("proxy fetch: status %d", e.Code)
 }
 
+// ProxyOptions tunes the reliability behaviour of a ProxyManager.
+type ProxyOptions struct {
+	// CacheTTL is how long the proxy definition list is reused before being
+	// reloaded from storage.
+	CacheTTL time.Duration
+	// CacheStaleGrace is how long a stale definition list keeps being served
+	// after a reload failure.
+	CacheStaleGrace time.Duration
+	// RetryAttempts is the total number of attempts for an upstream request.
+	RetryAttempts int
+	// VerifyChecksums enables validating fetched artifacts against the
+	// checksum published upstream before caching them.
+	VerifyChecksums bool
+	// Timeout bounds a single upstream request.
+	Timeout time.Duration
+
+	// Metric hooks; all optional.
+	OnCacheResult func(proxyCacheResult)
+	OnRetry       func()
+	OnFetch       func(proxy, result string)
+}
+
+func defaultProxyOptions() ProxyOptions {
+	return ProxyOptions{
+		CacheTTL:        defaultProxyCacheTTL,
+		CacheStaleGrace: defaultProxyCacheStaleGrace,
+		RetryAttempts:   defaultRetryAttempts,
+		VerifyChecksums: true,
+		Timeout:         60 * time.Second,
+	}
+}
+
 type ProxyManager struct {
 	store      Storage
 	logger     *zap.Logger
 	httpClient *http.Client
+	cache      *proxyCache
+	retry      retryPolicy
+	verify     bool
+	onFetch    func(proxy, result string)
 }
 
 func NewProxyManager(store Storage, logger *zap.Logger) *ProxyManager {
+	return NewProxyManagerWithOptions(store, logger, defaultProxyOptions())
+}
+
+func NewProxyManagerWithOptions(store Storage, logger *zap.Logger, opts ProxyOptions) *ProxyManager {
+	if opts.Timeout <= 0 {
+		opts.Timeout = 60 * time.Second
+	}
+	if opts.OnFetch == nil {
+		opts.OnFetch = func(string, string) {}
+	}
 	return &ProxyManager{
 		store:  store,
 		logger: logger,
 		httpClient: &http.Client{
-			Timeout: 60 * time.Second,
+			Timeout: opts.Timeout,
 		},
+		cache:   newProxyCache(opts.CacheTTL, opts.CacheStaleGrace, logger, opts.OnCacheResult),
+		retry:   newRetryPolicy(opts.RetryAttempts, logger, opts.OnRetry),
+		verify:  opts.VerifyChecksums,
+		onFetch: opts.OnFetch,
 	}
 }
 
+// List returns the configured proxies, served from an in-process cache.
+//
+// This used to hit object storage on every call, and every call site invoked it
+// several times per artifact request. Worse, a proxy whose definition failed to
+// load was skipped with only a warning, so a single transient storage error
+// made an entire upstream disappear and the request 404 despite the artifact
+// existing. Both behaviours are gone: loads are memoized, and a failed load
+// fails the whole refresh instead of quietly shrinking the list.
 func (p *ProxyManager) List(ctx context.Context) ([]Proxy, error) {
+	return p.cache.get(ctx, p.loadAll)
+}
+
+// errMalformedProxyConfig marks a proxy definition whose bytes were read
+// successfully but could not be decoded. Unlike a read failure, this is a
+// persistent operator error: the definition will not decode on the next attempt
+// either, so failing every request over it would turn one bad file into a total
+// outage. It is skipped and logged instead.
+var errMalformedProxyConfig = errors.New("malformed proxy config")
+
+func (p *ProxyManager) loadAll(ctx context.Context) ([]Proxy, error) {
 	entries, err := p.store.List(ctx, proxyConfigPrefix, 1000)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list proxy configs: %w", err)
 	}
 
 	var proxies []Proxy
@@ -70,11 +152,19 @@ func (p *ProxyManager) List(ctx context.Context) ([]Proxy, error) {
 			continue
 		}
 		cfg, err := p.load(ctx, e.Path)
-		if err != nil {
+		switch {
+		case errors.Is(err, errMalformedProxyConfig):
 			if p.logger != nil {
-				p.logger.Warn("load proxy", zap.String("path", e.Path), zap.Error(err))
+				p.logger.Warn("skipping malformed proxy config", zap.String("path", e.Path), zap.Error(err))
 			}
 			continue
+		case err != nil:
+			// A read failure is transient. Returning a partial list here is
+			// what produced phantom 404s: one flaky GET dropped an entire
+			// upstream, so artifacts already cached under it stopped
+			// resolving. Fail the refresh instead and let the cache serve the
+			// last known-good list.
+			return nil, fmt.Errorf("load proxy %q: %w", e.Path, err)
 		}
 		proxies = append(proxies, cfg)
 	}
@@ -93,7 +183,7 @@ func (p *ProxyManager) load(ctx context.Context, cfgPath string) (Proxy, error) 
 	}
 	var proxy Proxy
 	if err := json.Unmarshal(body, &proxy); err != nil {
-		return Proxy{}, err
+		return Proxy{}, fmt.Errorf("%w %q: %v", errMalformedProxyConfig, cfgPath, err)
 	}
 	return proxy, nil
 }
@@ -114,7 +204,11 @@ func (p *ProxyManager) Add(ctx context.Context, proxy Proxy) error {
 		return err
 	}
 	cfgKey := path.Join(proxyConfigPrefix, proxy.Name+".json")
-	return p.store.Put(ctx, cfgKey, strings.NewReader(string(data)), "application/json", int64(len(data)))
+	if err := p.store.Put(ctx, cfgKey, strings.NewReader(string(data)), "application/json", int64(len(data))); err != nil {
+		return err
+	}
+	p.cache.invalidate()
+	return nil
 }
 
 func (p *ProxyManager) Delete(ctx context.Context, name string) error {
@@ -127,7 +221,11 @@ func (p *ProxyManager) Delete(ctx context.Context, name string) error {
 	base := path.Join(proxyConfigPrefix, name+".json")
 	_ = p.store.Delete(ctx, base+".sha1")
 	_ = p.store.Delete(ctx, base+".md5")
-	return p.store.Delete(ctx, base)
+	if err := p.store.Delete(ctx, base); err != nil {
+		return err
+	}
+	p.cache.invalidate()
+	return nil
 }
 
 func (p *ProxyManager) Update(ctx context.Context, name string, proxy Proxy) error {
@@ -208,6 +306,26 @@ func splitProxyKey(key string) (proxyName, artifactPath string, ok bool) {
 	return parts[0], parts[1], true
 }
 
+func isChecksumPath(artifactPath string) bool {
+	lower := strings.ToLower(artifactPath)
+	return strings.HasSuffix(lower, ".sha1") ||
+		strings.HasSuffix(lower, ".md5") ||
+		strings.HasSuffix(lower, ".sha256") ||
+		strings.HasSuffix(lower, ".sha512") ||
+		strings.HasSuffix(lower, ".asc")
+}
+
+// verifiablePath reports whether it is worth asking upstream for a checksum of
+// this artifact. Checksum and signature files have none, and maven-metadata.xml
+// is regenerated upstream often enough that its published checksum is routinely
+// out of step with the document itself.
+func verifiablePath(artifactPath string) bool {
+	if isChecksumPath(artifactPath) {
+		return false
+	}
+	return !strings.HasSuffix(strings.ToLower(path.Base(artifactPath)), "maven-metadata.xml")
+}
+
 func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, error) {
 	name, artifactPath, ok := splitProxyKey(key)
 	if !ok {
@@ -227,25 +345,67 @@ func (p *ProxyManager) FetchAndCache(ctx context.Context, key string) (bool, err
 	if err != nil {
 		return false, err
 	}
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.retry.do(p.httpClient, req)
 	if err != nil {
+		p.onFetch(name, "error")
 		return false, err
 	}
 	defer resp.Body.Close()
 
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
+		p.onFetch(name, "notfound")
 		return false, nil
 	case resp.StatusCode >= 300:
+		p.onFetch(name, "error")
 		return false, ProxyStatusError{Code: resp.StatusCode}
 	}
 
-	isChecksum := strings.HasSuffix(strings.ToLower(artifactPath), ".sha1") ||
-		strings.HasSuffix(strings.ToLower(artifactPath), ".md5")
-	return p.cacheResponse(ctx, key, resp, isChecksum)
+	cached, err := p.cacheResponse(ctx, key, targetURL, resp, artifactPath)
+	switch {
+	case errors.Is(err, ErrChecksumMismatch):
+		p.onFetch(name, "mismatch")
+	case err != nil:
+		p.onFetch(name, "error")
+	default:
+		p.onFetch(name, "fetched")
+	}
+	return cached, err
 }
 
-func (p *ProxyManager) cacheResponse(ctx context.Context, key string, resp *http.Response, isChecksum bool) (bool, error) {
+// upstreamSHA1 returns the SHA-1 digest upstream publishes for an artifact, if
+// it publishes one. A missing or malformed checksum is not an error: plenty of
+// artifacts have none, and refusing to cache those would be worse than not
+// verifying them.
+func (p *ProxyManager) upstreamSHA1(ctx context.Context, targetURL string) (string, bool) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL+".sha1", nil)
+	if err != nil {
+		return "", false
+	}
+	resp, err := p.retry.do(p.httpClient, req)
+	if err != nil {
+		return "", false
+	}
+	defer drainAndClose(resp)
+	if resp.StatusCode != http.StatusOK {
+		return "", false
+	}
+	// Checksum files are 40 bytes plus at most a filename; cap the read.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+	if err != nil {
+		return "", false
+	}
+	sum := strings.ToLower(strings.TrimSpace(string(raw)))
+	if idx := strings.IndexAny(sum, " \t\r\n"); idx > 0 {
+		sum = sum[:idx]
+	}
+	if !sha1HexRe.MatchString(sum) {
+		return "", false
+	}
+	return sum, true
+}
+
+func (p *ProxyManager) cacheResponse(ctx context.Context, key, targetURL string, resp *http.Response, artifactPath string) (bool, error) {
 	tmp, err := os.CreateTemp("", "heimdall-proxy-*")
 	if err != nil {
 		return false, err
@@ -268,22 +428,46 @@ func (p *ProxyManager) cacheResponse(ctx context.Context, key string, resp *http
 		return false, err
 	}
 
+	gotSHA1 := hex.EncodeToString(sha1h.Sum(nil))
+
+	if p.verify && verifiablePath(artifactPath) {
+		if want, ok := p.upstreamSHA1(ctx, targetURL); ok && want != gotSHA1 {
+			if p.logger != nil {
+				p.logger.Warn("discarding artifact that does not match upstream checksum",
+					zap.String("key", key),
+					zap.String("expected", want),
+					zap.String("actual", gotSHA1),
+					zap.Int64("bytes", info.Size()),
+				)
+			}
+			return false, fmt.Errorf("%w for %s: expected %s, got %s", ErrChecksumMismatch, key, want, gotSHA1)
+		}
+	}
+
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
 		ct = "application/octet-stream"
 	}
+
+	// Checksums are written before the artifact. Readers look the artifact up
+	// first, so this ordering guarantees that a visible artifact always has a
+	// matching checksum beside it. The reverse order leaves a window in which
+	// the artifact is served with a stale or absent checksum, which Maven
+	// reports as a corrupt download.
+	if !isChecksumPath(artifactPath) {
+		if err := p.storeChecksums(ctx, key, gotSHA1, md5h); err != nil {
+			return false, err
+		}
+	}
+
 	if err := p.store.Put(ctx, key, tmp, ct, info.Size()); err != nil {
 		return false, err
 	}
 
-	if !isChecksum {
-		return true, p.storeChecksums(ctx, key, sha1h, md5h)
-	}
 	return true, nil
 }
 
-func (p *ProxyManager) storeChecksums(ctx context.Context, key string, sha1h, md5h hash.Hash) error {
-	sha1sum := hex.EncodeToString(sha1h.Sum(nil))
+func (p *ProxyManager) storeChecksums(ctx context.Context, key, sha1sum string, md5h hash.Hash) error {
 	md5sum := hex.EncodeToString(md5h.Sum(nil))
 	if err := p.store.Put(ctx, key+".sha1", strings.NewReader(sha1sum), "text/plain", int64(len(sha1sum))); err != nil {
 		return err
@@ -384,7 +568,7 @@ func (p *ProxyManager) ListPath(ctx context.Context, key string, limit int32) ([
 	if err != nil {
 		return nil, true, err
 	}
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.retry.do(p.httpClient, req)
 	if err != nil {
 		return nil, true, err
 	}
@@ -423,7 +607,7 @@ func (p *ProxyManager) Head(ctx context.Context, key string) (*http.Response, bo
 	if err != nil {
 		return nil, false, err
 	}
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.retry.do(p.httpClient, req)
 	if err != nil {
 		return nil, false, err
 	}
