@@ -56,9 +56,14 @@ type Server struct {
 }
 
 func New(store Storage, logger *zap.Logger, m *metrics.Registry, user, pass, apiKeyEndpoint, apiKeyToken string) *Server {
+	return NewWithProxyOptions(store, logger, m, user, pass, apiKeyEndpoint, apiKeyToken, defaultProxyOptions())
+}
+
+// NewWithProxyOptions builds a Server whose proxy layer is tuned by opts.
+func NewWithProxyOptions(store Storage, logger *zap.Logger, m *metrics.Registry, user, pass, apiKeyEndpoint, apiKeyToken string, opts ProxyOptions) *Server {
 	return &Server{
 		store:          store,
-		proxy:          NewProxyManager(store, logger),
+		proxy:          NewProxyManagerWithOptions(store, logger, opts),
 		logger:         logger,
 		metrics:        m,
 		user:           user,

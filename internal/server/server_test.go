@@ -998,7 +998,7 @@ func TestRunChecksumScanner(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunChecksumScanner(ctx, zaptest.NewLogger(t), store, "", time.Millisecond)
+		RunChecksumScanner(ctx, zaptest.NewLogger(t), store, "", time.Millisecond, nil)
 	}()
 
 	time.Sleep(20 * time.Millisecond)

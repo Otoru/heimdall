@@ -57,7 +57,22 @@ func main() {
 	docs.SwaggerInfo.Title = "Heimdall API"
 	docs.SwaggerInfo.Version = "1.0"
 
-	srv := server.New(store, logger, appMetrics, cfg.AuthUser, cfg.AuthPassword, cfg.APIKeyEndpoint, cfg.APIKeyToken)
+	proxyOpts := server.ProxyOptions{
+		CacheTTL:        cfg.ProxyCacheTTL,
+		CacheStaleGrace: cfg.ProxyCacheStaleGrace,
+		RetryAttempts:   cfg.UpstreamRetryAttempts,
+		VerifyChecksums: cfg.VerifyUpstreamChecksums,
+		Timeout:         cfg.UpstreamTimeout,
+		OnCacheResult: func(r server.ProxyCacheResult) {
+			appMetrics.ProxyConfigCache.WithLabelValues(string(r)).Inc()
+		},
+		OnRetry: appMetrics.UpstreamRetries.Inc,
+		OnFetch: func(proxy, result string) {
+			appMetrics.ProxyFetch.WithLabelValues(proxy, result).Inc()
+		},
+	}
+
+	srv := server.NewWithProxyOptions(store, logger, appMetrics, cfg.AuthUser, cfg.AuthPassword, cfg.APIKeyEndpoint, cfg.APIKeyToken, proxyOpts)
 
 	httpServer := &http.Server{
 		Addr:    cfg.Addr,
@@ -101,7 +116,14 @@ func main() {
 	if err != nil {
 		logger.Warn("invalid CHECKSUM_SCAN_INTERVAL, skipping scanner", zap.Error(err))
 	} else if dur > 0 {
-		go server.RunChecksumScanner(ctx, logger, store, cfg.ChecksumScanPrefix, dur)
+		// Under an autoscaler every replica would otherwise run a full-bucket
+		// scan each interval. The lease keeps that to one replica; the scan is
+		// idempotent, so a brief split brain only wastes work.
+		var lease *server.Lease
+		if cfg.ScannerLeaderElection {
+			lease = server.NewLease(store, logger, 2*dur)
+		}
+		go server.RunChecksumScanner(ctx, logger, store, cfg.ChecksumScanPrefix, dur, lease)
 	}
 
 	logger.Info("server starting", zap.String("addr", cfg.Addr), zap.String("bucket", cfg.Bucket), zap.String("prefix", cfg.Prefix))
