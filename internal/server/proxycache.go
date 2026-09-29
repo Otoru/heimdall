@@ -20,15 +20,15 @@ const (
 	defaultProxyCacheStaleGrace = 15 * time.Minute
 )
 
-// proxyCacheResult describes how a call to proxyCache.get was satisfied. It is
+// ProxyCacheResult describes how a call to proxyCache.get was satisfied. It is
 // reported to the metrics hook so the cache can be observed in production.
-type proxyCacheResult string
+type ProxyCacheResult string
 
 const (
-	proxyCacheHit     proxyCacheResult = "hit"
-	proxyCacheRefresh proxyCacheResult = "refresh"
-	proxyCacheStale   proxyCacheResult = "stale"
-	proxyCacheError   proxyCacheResult = "error"
+	ProxyCacheHit     ProxyCacheResult = "hit"
+	ProxyCacheRefresh ProxyCacheResult = "refresh"
+	ProxyCacheStale   ProxyCacheResult = "stale"
+	ProxyCacheError   ProxyCacheResult = "error"
 )
 
 type proxySnapshot struct {
@@ -46,7 +46,7 @@ type proxyCache struct {
 	ttl        time.Duration
 	staleGrace time.Duration
 	logger     *zap.Logger
-	onResult   func(proxyCacheResult)
+	onResult   func(ProxyCacheResult)
 
 	mu   sync.RWMutex
 	snap *proxySnapshot
@@ -57,7 +57,7 @@ type proxyCache struct {
 	now func() time.Time
 }
 
-func newProxyCache(ttl, staleGrace time.Duration, logger *zap.Logger, onResult func(proxyCacheResult)) *proxyCache {
+func newProxyCache(ttl, staleGrace time.Duration, logger *zap.Logger, onResult func(ProxyCacheResult)) *proxyCache {
 	if ttl <= 0 {
 		ttl = defaultProxyCacheTTL
 	}
@@ -65,7 +65,7 @@ func newProxyCache(ttl, staleGrace time.Duration, logger *zap.Logger, onResult f
 		staleGrace = defaultProxyCacheStaleGrace
 	}
 	if onResult == nil {
-		onResult = func(proxyCacheResult) {}
+		onResult = func(ProxyCacheResult) {}
 	}
 	return &proxyCache{
 		ttl:        ttl,
@@ -104,7 +104,7 @@ func (c *proxyCache) invalidate() {
 // config store must not make cached artifacts disappear.
 func (c *proxyCache) get(ctx context.Context, load func(context.Context) ([]Proxy, error)) ([]Proxy, error) {
 	if snap := c.snapshot(); snap != nil && c.now().Sub(snap.loadedAt) < c.ttl {
-		c.onResult(proxyCacheHit)
+		c.onResult(ProxyCacheHit)
 		return snap.proxies, nil
 	}
 
@@ -125,7 +125,7 @@ func (c *proxyCache) get(ctx context.Context, load func(context.Context) ([]Prox
 
 	if err != nil {
 		if snap := c.snapshot(); snap != nil && c.now().Sub(snap.loadedAt) < c.staleGrace {
-			c.onResult(proxyCacheStale)
+			c.onResult(ProxyCacheStale)
 			if c.logger != nil {
 				c.logger.Warn("serving stale proxy list after refresh failure",
 					zap.Error(err),
@@ -135,10 +135,10 @@ func (c *proxyCache) get(ctx context.Context, load func(context.Context) ([]Prox
 			}
 			return snap.proxies, nil
 		}
-		c.onResult(proxyCacheError)
+		c.onResult(ProxyCacheError)
 		return nil, err
 	}
 
-	c.onResult(proxyCacheRefresh)
+	c.onResult(ProxyCacheRefresh)
 	return v.(*proxySnapshot).proxies, nil
 }

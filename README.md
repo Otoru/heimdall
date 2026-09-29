@@ -31,6 +31,12 @@ Lightweight Maven-compatible HTTP server in Go. Serves artifacts from an S3-comp
 | `AUTH_API_KEY_TOKEN` | — | no | Token sent as `Authorization` header when calling the validation endpoint. Use `envSecrets` in Helm. |
 | `CHECKSUM_SCAN_INTERVAL` | — | no | Background checksum repair interval (e.g. `10m`); empty disables. |
 | `CHECKSUM_SCAN_PREFIX` | — | no | Limit checksum repair scan to a prefix. |
+| `SCANNER_LEADER_ELECTION` | `true` | no | Gate the checksum scan on a shared lease so only one replica scans per interval. |
+| `PROXY_CACHE_TTL` | `30s` | no | How long the proxy definition list is reused before reloading from storage. |
+| `PROXY_CACHE_STALE_GRACE` | `15m` | no | How long a stale definition list keeps being served after a reload failure. |
+| `UPSTREAM_RETRY_ATTEMPTS` | `3` | no | Attempts per upstream GET/HEAD, including the first. Retries transport errors, 429 and 5xx. |
+| `UPSTREAM_TIMEOUT` | `60s` | no | Timeout for a single upstream request. |
+| `VERIFY_UPSTREAM_CHECKSUMS` | `true` | no | Validate fetched artifacts against the upstream `.sha1` before caching; discard on mismatch. |
 
 ## Endpoints
 
@@ -127,6 +133,20 @@ docker compose up --build
 
 For Basic Auth, add a `<server>` entry in `settings.xml` with `id` matching the repository. Alternatively, pass `X-API-Key: <token>` on every request if the API key auth is configured.
 
+## Running multiple replicas
+
+Heimdall is stateless apart from the object store, so replicas scale freely.
+Two things are worth knowing:
+
+- The checksum repair scan is gated on a storage-backed lease
+  (`SCANNER_LEADER_ELECTION`), so only one replica performs the full-bucket
+  walk per interval. The lease is best-effort rather than mutual exclusion:
+  the object store offers no compare-and-set, so a brief split brain is
+  possible. That is safe here only because the scan is idempotent.
+- Each replica keeps its own proxy definition cache. A definition change is
+  therefore visible to the replica that served the write immediately, and to
+  the others within `PROXY_CACHE_TTL`.
+
 ## Notes
 
 - Object keys mirror the request path (optional `S3_PREFIX` prepended).
@@ -142,7 +162,9 @@ Charts live under `charts/heimdall`. Package version is tracked in `Chart.yaml` 
 | --- | --- |
 | `image.repository` / `image.tag` | Container image (defaults to `ghcr.io/otoru/heimdall:<appVersion>`; set `image.tag` to override). |
 | `service.port` / `service.metricsPort` | HTTP and metrics ports. |
-| `autoscaling.*` | HPA settings (CPU/memory utilization targets, min/max replicas). |
+| `autoscaling.*` | HPA settings (CPU/memory utilization targets, min/max replicas). Requires `resources.requests`; the chart fails the render without it, because utilization targets are a percentage of the request. When enabled, the Deployment omits `replicas` so a GitOps controller does not fight the autoscaler. |
+| `resources` | Container requests/limits. Required when `autoscaling.enabled`. |
+| `podDisruptionBudget.*` | Optional PDB, recommended alongside autoscaling so a node drain cannot take every replica at once. |
 | `ingress.*` | Ingress host/paths/class/tls. |
 | `env` / `envSecrets` / `envConfigMaps` | Direct env vars, secret-backed env vars, and ConfigMap-backed env vars. |
 

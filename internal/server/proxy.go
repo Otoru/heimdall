@@ -69,7 +69,7 @@ type ProxyOptions struct {
 	Timeout time.Duration
 
 	// Metric hooks; all optional.
-	OnCacheResult func(proxyCacheResult)
+	OnCacheResult func(ProxyCacheResult)
 	OnRetry       func()
 	OnFetch       func(proxy, result string)
 }

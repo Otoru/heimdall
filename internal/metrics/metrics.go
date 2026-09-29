@@ -13,6 +13,17 @@ type Registry struct {
 	RequestCount    *prometheus.CounterVec
 	RequestDuration *prometheus.HistogramVec
 	InFlight        prometheus.Gauge
+
+	// ProxyConfigCache counts how proxy definition lookups were satisfied:
+	// hit, refresh, stale or error. A rising "stale" rate means the object
+	// store is flaky; "error" means requests are being failed outright.
+	ProxyConfigCache *prometheus.CounterVec
+	// ProxyFetch counts upstream artifact fetches by proxy and outcome:
+	// fetched, notfound, mismatch or error.
+	ProxyFetch *prometheus.CounterVec
+	// UpstreamRetries counts retried upstream requests. Cross-referencing it
+	// with build failures is how a degraded upstream gets spotted early.
+	UpstreamRetries prometheus.Counter
 }
 
 func New() *Registry {
@@ -44,13 +55,37 @@ func New() *Registry {
 		Help: "Quantidade de requisições em andamento.",
 	})
 
-	reg.MustRegister(reqCount, reqDuration, inFlight)
+	proxyConfigCache := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "heimdall_proxy_config_cache_total",
+			Help: "Proxy definition lookups by outcome (hit, refresh, stale, error).",
+		},
+		[]string{"result"},
+	)
+
+	proxyFetch := prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "heimdall_proxy_fetch_total",
+			Help: "Upstream artifact fetches by proxy and outcome (fetched, notfound, mismatch, error).",
+		},
+		[]string{"proxy", "result"},
+	)
+
+	upstreamRetries := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "heimdall_upstream_retries_total",
+		Help: "Upstream requests that were retried after a transport error, 429 or 5xx.",
+	})
+
+	reg.MustRegister(reqCount, reqDuration, inFlight, proxyConfigCache, proxyFetch, upstreamRetries)
 
 	return &Registry{
-		Registry:        reg,
-		RequestCount:    reqCount,
-		RequestDuration: reqDuration,
-		InFlight:        inFlight,
+		Registry:         reg,
+		RequestCount:     reqCount,
+		RequestDuration:  reqDuration,
+		InFlight:         inFlight,
+		ProxyConfigCache: proxyConfigCache,
+		ProxyFetch:       proxyFetch,
+		UpstreamRetries:  upstreamRetries,
 	}
 }
 

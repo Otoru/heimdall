@@ -1,3 +1,6 @@
+{{- if and .Values.autoscaling.enabled (not (and .Values.resources .Values.resources.requests)) }}
+{{- fail "autoscaling.enabled requires resources.requests: CPU and memory utilization targets are a percentage of the request, so the HPA reports <unknown> and never scales without one." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,7 +8,12 @@ metadata:
   labels:
     {{- include "heimdall.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
+  # Omitted when autoscaling is on. Rendering a fixed replica count alongside
+  # an HPA makes a reconciling GitOps controller fight the autoscaler: it sees
+  # the scaled Deployment as drift and scales it back down on every sync.
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ include "heimdall.name" . }}
